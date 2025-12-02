@@ -1,0 +1,24 @@
+Next Steps
+
+Logical Next Steps for Features
+Critical (Complete Core Functionality)
+PDF text extraction — Replace the placeholder in internal/pdf/processor.go with a library like github.com/gen2brain/go-fitz or github.com/ledongthuc/pdf.
+Embedding integration — Add an embedding service (OpenAI, local model via Ollama, or Hugging Face) to generate vectors from text chunks.
+Complete Qdrant operations — Implement Upsert, Search, and Delete in internal/vectordb/vectordb.go with proper collection management and error handling.
+Search API implementation — Wire the search endpoint to use embeddings and return real results with proper formatting.
+High Priority (User Experience)
+Search results UI — Display matches with snippets, scores, source documents, and metadata in the search page.
+Document management — Add endpoints/pages to view uploaded documents, delete documents, and see ingestion status.
+Metadata filtering — Support filtering by filename, date, or custom metadata in search queries.
+Chunk preview — Show surrounding context for search results and link back to source documents.
+Medium Priority (Production Readiness)
+Authentication/authorization — Add user authentication and access control for multi-user deployments.
+Error handling and retries — Improve resilience with retry logic, dead-letter queues, and better error messages.
+Monitoring and observability — Add metrics (Prometheus), structured logging, and health check endpoints.
+Document updates — Handle re-uploading the same document (detect changes, update existing records).
+Nice to Have (Enhancements)
+Multi-format support — Extend beyond PDFs to Word, Markdown, plain text, etc.
+Advanced chunking strategies — Implement semantic chunking, sentence-aware splitting, or table extraction.
+Search result ranking — Add hybrid search (keyword + semantic), relevance tuning, and result deduplication.
+Batch processing — Support bulk document uploads and processing status tracking.
+API documentation — Add OpenAPI/Swagger docs for the HTTP API.

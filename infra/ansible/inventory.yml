@@ -1,0 +1,9 @@
+all:
+  children:
+    hive_servers:
+      hosts:
+        hive-server:
+          ansible_host: <DROPLET_IP>
+          ansible_user: root
+          ansible_ssh_private_key_file: ~/.ssh/id_rsa
+

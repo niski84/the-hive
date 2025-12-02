@@ -1,0 +1,53 @@
+---
+- name: Configure Hive Server
+  hosts: hive_servers
+  become: true
+  vars:
+    docker_compose_version: "2.24.0"
+    
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - git
+          - curl
+          - unzip
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Create application directory
+      file:
+        path: /opt/the-hive
+        state: directory
+        mode: '0755'
+
+    - name: Create logs directory
+      file:
+        path: /opt/the-hive/logs
+        state: directory
+        mode: '0755'
+
+    - name: Create data directory for Qdrant
+      file:
+        path: /opt/the-hive/data/qdrant
+        state: directory
+        mode: '0755'
+

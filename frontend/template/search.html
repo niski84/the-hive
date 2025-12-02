@@ -1,0 +1,43 @@
+{{template "base.html" .}}
+
+{{define "title"}}Search - The Hive{{end}}
+
+{{define "content"}}
+<div class="max-w-4xl mx-auto">
+    <h2 class="text-3xl font-bold text-gray-900 mb-6">Search The Hive</h2>
+    
+    <form hx-post="/api/search" hx-target="#results" hx-swap="innerHTML" class="mb-8">
+        <div class="flex gap-4">
+            <input 
+                type="text" 
+                name="query" 
+                placeholder="Enter your search query..."
+                class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                required
+            >
+            <button 
+                type="submit" 
+                class="bg-blue-600 text-white px-8 py-3 rounded-lg font-semibold hover:bg-blue-700 transition"
+            >
+                Search
+            </button>
+        </div>
+    </form>
+
+    <div id="results" class="space-y-4">
+        <div class="bg-white p-6 rounded-lg shadow text-center text-gray-500">
+            Enter a search query above to find relevant documents
+        </div>
+    </div>
+</div>
+
+<script>
+    // Handle search results
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        if (event.detail.target.id === 'results') {
+            // Results have been updated
+        }
+    });
+</script>
+{{end}}
+

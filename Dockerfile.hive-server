@@ -1,0 +1,45 @@
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache git protobuf protobuf-dev
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY proto/ ./proto/
+
+# Generate protobuf code
+RUN mkdir -p internal/proto
+RUN protoc --go_out=. --go_opt=paths=source_relative \
+    --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+    proto/hive.proto
+
+# Build the binary
+RUN CGO_ENABLED=1 GOOS=linux go build -o /hive-server ./cmd/hive-server
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates sqlite
+
+WORKDIR /app
+
+# Copy binary and frontend assets
+COPY --from=builder /hive-server .
+COPY frontend/ ./frontend/
+COPY docker-compose.yml ./
+
+# Create directories
+RUN mkdir -p data logs
+
+EXPOSE 8080 50051
+
+CMD ["./hive-server"]
+

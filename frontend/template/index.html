@@ -1,0 +1,34 @@
+{{template "base.html" .}}
+
+{{define "title"}}Home - The Hive{{end}}
+
+{{define "content"}}
+<div class="text-center">
+    <h2 class="text-4xl font-bold text-gray-900 mb-4">Welcome to The Hive</h2>
+    <p class="text-xl text-gray-600 mb-8">A distributed RAG system for document indexing and search</p>
+    
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-12">
+        <div class="bg-white p-6 rounded-lg shadow">
+            <h3 class="text-xl font-semibold mb-2">📄 Upload Documents</h3>
+            <p class="text-gray-600">Drones can upload PDFs to be indexed by the Hive</p>
+        </div>
+        
+        <div class="bg-white p-6 rounded-lg shadow">
+            <h3 class="text-xl font-semibold mb-2">🔍 Search</h3>
+            <p class="text-gray-600">Query indexed documents using semantic search</p>
+        </div>
+        
+        <div class="bg-white p-6 rounded-lg shadow">
+            <h3 class="text-xl font-semibold mb-2">🚀 Fast & Scalable</h3>
+            <p class="text-gray-600">Built with Go, Qdrant, and modern web technologies</p>
+        </div>
+    </div>
+
+    <div class="mt-12">
+        <a href="/search" class="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+            Start Searching
+        </a>
+    </div>
+</div>
+{{end}}
+

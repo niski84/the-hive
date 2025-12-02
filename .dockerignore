@@ -1,0 +1,15 @@
+.git
+.gitignore
+*.md
+.vscode
+.idea
+bin/
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+.env
+*.tfstate
+.terraform/
+

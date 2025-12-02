@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package hive;
+
+option go_package = "github.com/the-hive/internal/proto";
+
+// Hive service definition
+service Hive {
+  // Ingest a document chunk into the Hive
+  rpc Ingest(Chunk) returns (Status);
+  
+  // Query the Hive for relevant documents
+  rpc Query(Search) returns (Result);
+}
+
+// A chunk of text from a document
+message Chunk {
+  string id = 1;              // Unique identifier for the chunk
+  string document_id = 2;     // ID of the source document
+  string content = 3;         // The text content of the chunk
+  repeated float vector = 4;  // The embedding vector (optional, can be computed server-side)
+  map<string, string> metadata = 5;  // Additional metadata (filename, page number, etc.)
+}
+
+// Status response for ingestion
+message Status {
+  bool success = 1;
+  string message = 2;
+  string chunk_id = 3;
+}
+
+// Search query
+message Search {
+  string query = 1;           // The search query text
+  int32 top_k = 2;            // Number of results to return
+  repeated float query_vector = 3;  // Pre-computed query embedding (optional)
+}
+
+// Search result
+message Result {
+  repeated Match matches = 1;
+}
+
+// A single search match
+message Match {
+  string chunk_id = 1;
+  string document_id = 2;
+  string content = 3;
+  float score = 4;            // Relevance score
+  map<string, string> metadata = 5;
+}
+
