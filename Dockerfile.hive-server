@@ -1,10 +1,17 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
 # Install build dependencies
-RUN apk add --no-cache git protobuf protobuf-dev
+# Note: MuPDF is required for go-fitz (PDF processing)
+RUN apk add --no-cache \
+    git \
+    protobuf \
+    protobuf-dev \
+    build-base \
+    mupdf-dev \
+    pkgconfig
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -21,25 +28,37 @@ RUN protoc --go_out=. --go_opt=paths=source_relative \
     --go-grpc_out=. --go-grpc_opt=paths=source_relative \
     proto/hive.proto
 
-# Build the binary
+# Build the binary with CGO enabled (required for go-fitz and sqlite)
 RUN CGO_ENABLED=1 GOOS=linux go build -o /hive-server ./cmd/hive-server
 
 # Runtime stage
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates sqlite
+# Install runtime dependencies
+# MuPDF libraries are needed for PDF processing at runtime
+RUN apk add --no-cache \
+    ca-certificates \
+    sqlite \
+    mupdf \
+    libc6-compat
 
 WORKDIR /app
 
 # Copy binary and frontend assets
 COPY --from=builder /hive-server .
 COPY frontend/ ./frontend/
-COPY docker-compose.yml ./
 
-# Create directories
+# Create directories for data and logs
 RUN mkdir -p data logs
 
 EXPOSE 8080 50051
+
+# Set default environment variables
+ENV EMBEDDER_TYPE=mock
+ENV GRPC_PORT=50051
+ENV HTTP_PORT=8080
+ENV QDRANT_ADDR=qdrant:6334
+ENV DB_PATH=/app/data/hive.db
 
 CMD ["./hive-server"]
 

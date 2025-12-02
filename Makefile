@@ -12,14 +12,18 @@ proto:
 generate: proto
 
 # Build the Hive server binary
+# CGO_ENABLED=1 is required for go-fitz (PDF processing) and sqlite
 build-hive:
 	@echo "Building Hive server..."
-	@go build -o bin/hive-server ./cmd/hive-server
+	@mkdir -p bin
+	@CGO_ENABLED=1 go build -o bin/hive-server ./cmd/hive-server
 
 # Build the Drone client binary
+# CGO_ENABLED=1 is required for go-fitz (PDF processing)
 build-drone:
 	@echo "Building Drone client..."
-	@go build -o bin/drone-client ./cmd/drone-client
+	@mkdir -p bin
+	@CGO_ENABLED=1 go build -o bin/drone-client ./cmd/drone-client
 
 # Build all binaries
 build: build-hive build-drone

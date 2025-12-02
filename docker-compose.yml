@@ -31,6 +31,11 @@ services:
       - HTTP_PORT=8080
       - QDRANT_ADDR=qdrant:6334
       - DB_PATH=/app/data/hive.db
+      - EMBEDDER_TYPE=${EMBEDDER_TYPE:-mock}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - EMBEDDER_MODEL=${EMBEDDER_MODEL:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://localhost:11434}
+      - JOB_QUEUE_KEY=${JOB_QUEUE_KEY:-jobs:default}
     depends_on:
       - qdrant
     networks:

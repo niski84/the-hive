@@ -1,13 +1,14 @@
 # The Hive - Distributed RAG System
 
-A production-ready RAG (Retrieval-Augmented Generation) system that allows distributed clients ("Drones") to upload PDFs, which are indexed by a central server ("Hive") and made searchable via a web UI.
+A production-ready RAG (Retrieval-Augmented Generation) system that allows distributed clients ("Drones") to upload documents (PDF, DOCX, XLSX, HTML, EML), which are indexed by a central server ("Hive") and made searchable via a web UI.
 
 ## Architecture
 
 - **Hive Server**: Central Go server that handles document ingestion, indexing, and search
-- **Drone Client**: Local Go client that watches for PDF files and syncs them to the Hive
+- **Drone Client**: Local Go client that watches for files (PDF, DOCX, XLSX, HTML, EML) and syncs them to the Hive
 - **Qdrant**: Vector database for semantic search
 - **SQLite**: Metadata storage
+- **Embeddings**: Supports OpenAI, Ollama, or mock embedders
 - **Web UI**: Go templates + HTMX + TailwindCSS
 
 ## Technology Stack
@@ -24,24 +25,27 @@ A production-ready RAG (Retrieval-Augmented Generation) system that allows distr
 
 ```
 the-hive/
-├── infra/
-│   ├── terraform/      # Infrastructure as Code
-│   ├── ansible/        # Configuration Management
-│   └── caddy/          # Reverse proxy configuration
-├── backend/
-│   ├── cmd/
-│   │   ├── hive-server/    # Main Hive server binary
-│   │   └── drone-client/   # Drone client binary
-│   ├── internal/
-│   │   ├── proto/      # Generated protobuf code
-│   │   ├── server/     # gRPC service implementation
-│   │   ├── client/     # Drone client logic
-│   │   ├── pdf/        # PDF processing
-│   │   └── vectordb/   # Vector database abstraction
-│   └── proto/          # Protobuf definitions
-└── frontend/
-    ├── template/       # Go HTML templates
-    └── static/         # Static assets
+├── cmd/
+│   ├── hive-server/    # Main Hive server binary
+│   └── drone-client/   # Drone client binary
+├── internal/
+│   ├── proto/          # Generated protobuf code
+│   ├── server/         # gRPC service implementation
+│   ├── client/         # Drone client logic
+│   ├── parser/         # Multimodal document parsers (PDF, DOCX, Excel, HTML, EML)
+│   ├── embeddings/     # Embedding service (OpenAI, Ollama, mock)
+│   ├── vectordb/       # Vector database abstraction
+│   ├── queue/          # Job queue (Redis)
+│   ├── worker/         # Background workers
+│   └── jobs/           # Job handlers
+├── proto/              # Protobuf definitions
+├── frontend/
+│   ├── template/       # Go HTML templates
+│   └── static/         # Static assets
+└── infra/
+    ├── terraform/      # Infrastructure as Code
+    ├── ansible/        # Configuration Management
+    └── caddy/          # Reverse proxy configuration
 ```
 
 ## Getting Started
@@ -51,7 +55,15 @@ the-hive/
 - Go 1.24+
 - Docker and Docker Compose
 - Protobuf compiler (`protoc`)
+- MuPDF library (for PDF processing via go-fitz)
 - Make (optional, but recommended)
+- Redis (optional, for job queue)
+
+**Quick Setup:**
+```bash
+# Run the setup script to install dependencies
+./backend/SETUP.sh
+```
 
 ### Build
 
@@ -98,6 +110,15 @@ docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```bash
 ./bin/drone-client -watch-dir ./watch
 ```
+
+The drone client supports multiple file types:
+- **PDF** files (`.pdf`)
+- **Word documents** (`.docx`)
+- **Excel spreadsheets** (`.xlsx`, `.xls`)
+- **HTML files** (`.html`, `.htm`)
+- **Email files** (`.eml`)
+
+Place any supported file type in the watch directory and it will be automatically processed.
 
 ## Development
 
@@ -148,6 +169,25 @@ Update `infra/ansible/inventory.yml` with your droplet IP, then:
 ansible-playbook -i inventory.yml playbook.yml
 ```
 
+## Configuration
+
+### Environment Variables
+
+**Hive Server:**
+- `EMBEDDER_TYPE`: Embedder type - `openai`, `ollama`, or `mock` (default: `mock`)
+- `OPENAI_API_KEY`: OpenAI API key (required if using OpenAI embedder)
+- `EMBEDDER_MODEL`: Model name (e.g., `text-embedding-3-small` for OpenAI)
+- `OLLAMA_BASE_URL`: Ollama server URL (default: `http://localhost:11434`)
+- `JOB_QUEUE_KEY`: Redis job queue key (default: `jobs:default`)
+
+**Example:**
+```bash
+export EMBEDDER_TYPE=openai
+export OPENAI_API_KEY=sk-...
+export EMBEDDER_MODEL=text-embedding-3-small
+./bin/hive-server
+```
+
 ## API
 
 ### gRPC
@@ -159,7 +199,8 @@ ansible-playbook -i inventory.yml playbook.yml
 
 - `GET /`: Home page
 - `GET /search`: Search page
-- `POST /api/search`: Search API endpoint
+- `POST /api/search`: Search API endpoint (accepts `query` parameter)
+- `POST /api/jobs/recalc-priority`: Job queue endpoint
 
 ## License
 

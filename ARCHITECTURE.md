@@ -2,7 +2,7 @@
 
 ## System Components
 
-### 1. Hive Server (`backend/cmd/hive-server/`)
+### 1. Hive Server (`cmd/hive-server/`)
 - **Purpose**: Central server that receives and indexes documents
 - **Interfaces**:
   - gRPC server (port 50051): Receives chunks from drones
@@ -10,41 +10,52 @@
 - **Dependencies**:
   - SQLite: Metadata storage
   - Qdrant: Vector database for semantic search
+  - Redis: Job queue (optional)
+  - Embedding service: OpenAI, Ollama, or mock
 - **Key Files**:
-  - `main.go`: Server entry point with gRPC/HTTP setup
-  - `backend/internal/server/hive_service.go`: gRPC service implementation
+  - `cmd/hive-server/main.go`: Server entry point with gRPC/HTTP setup
+  - `internal/server/hive_service.go`: gRPC service implementation
+  - `internal/embeddings/`: Embedding service implementations
 
-### 2. Drone Client (`backend/cmd/drone-client/`)
-- **Purpose**: Local client that watches for PDFs and syncs to Hive
+### 2. Drone Client (`cmd/drone-client/`)
+- **Purpose**: Local client that watches for files and syncs to Hive
 - **Features**:
   - File system watching (`fsnotify`)
-  - PDF text extraction (placeholder)
-  - Text chunking
+  - Multimodal document parsing (PDF, DOCX, Excel, HTML, EML)
+  - Text chunking with overlap
   - gRPC communication with Hive
+  - Temporary file filtering
 - **Key Files**:
-  - `main.go`: Client entry point with file watching
-  - `backend/internal/client/drone_client.go`: Hive communication client
+  - `cmd/drone-client/main.go`: Client entry point with file watching
+  - `internal/client/drone_client.go`: Hive communication client
+  - `internal/parser/`: Multimodal document parsers
 
 ### 3. Communication Protocol
 - **Protocol**: gRPC with Protobuf
-- **Definition**: `backend/proto/hive.proto`
+- **Definition**: `proto/hive.proto`
 - **Services**:
   - `Ingest(Chunk) -> Status`: Upload document chunks
   - `Query(Search) -> Result`: Search indexed documents
-- **Generated Code**: `backend/internal/proto/` (run `make proto` to generate)
+- **Generated Code**: `internal/proto/` (run `make proto` to generate)
 
 ### 4. Vector Database
 - **Technology**: Qdrant (Docker container)
-- **Interface**: `backend/internal/vectordb/vectordb.go`
+- **Interface**: `internal/vectordb/vectordb.go`
 - **Operations**: Upsert, Search, Delete
-- **Status**: Placeholder implementation (needs embedding integration)
+- **Status**: Implementation structure complete, API calls need verification
 
-### 5. PDF Processing
-- **Location**: `backend/internal/pdf/processor.go`
-- **Functions**:
-  - Text extraction (placeholder)
-  - Text chunking with overlap
-- **Status**: Placeholder implementation
+### 5. Document Parsing
+- **Location**: `internal/parser/`
+- **Supported Formats**:
+  - PDF: `parser/pdf.go` (using go-fitz/MuPDF)
+  - DOCX: `parser/docx.go` (using nguyenthenguyen/docx)
+  - Excel: `parser/excel.go` (using xuri/excelize with markdownification)
+  - HTML: `parser/html.go` (using PuerkitoBio/goquery, removes scripts/styles)
+  - EML: `parser/email.go` (using mnako/letters)
+- **Features**:
+  - Strategy Pattern for file type routing
+  - Text chunking with configurable overlap
+  - Temporary file filtering
 
 ### 6. Web UI
 - **Technology**: Go `html/template` + HTMX + TailwindCSS
@@ -99,14 +110,16 @@
 ## Data Flow
 
 ### Document Ingestion
-1. PDF placed in watched directory
-2. Drone client detects file change
-3. PDF text extracted and chunked
-4. Chunks sent via gRPC to Hive
-5. Hive stores:
-   - Metadata in SQLite
-   - Vectors in Qdrant (after embedding)
-6. Status returned to Drone
+1. File (PDF, DOCX, Excel, HTML, or EML) placed in watched directory
+2. Drone client detects file change (skips temporary files)
+3. File routed to appropriate parser based on extension
+4. Text extracted and chunked with overlap
+5. Chunks sent via gRPC to Hive
+6. Hive processes:
+   - Stores metadata in SQLite
+   - Generates embeddings (if not provided)
+   - Stores vectors in Qdrant
+7. Status returned to Drone
 
 ### Search Flow
 1. User submits query via Web UI
@@ -120,40 +133,67 @@
 
 ```
 the-hive/
-├── backend/
-│   ├── cmd/
-│   │   ├── hive-server/      # Hive server binary
-│   │   └── drone-client/     # Drone client binary
-│   ├── internal/
-│   │   ├── client/           # Drone client logic
-│   │   ├── pdf/              # PDF processing
-│   │   ├── proto/            # Generated protobuf code
-│   │   ├── server/           # gRPC service implementation
-│   │   └── vectordb/         # Vector database abstraction
-│   └── proto/                # Protobuf definitions
+├── cmd/
+│   ├── hive-server/          # Hive server binary
+│   └── drone-client/         # Drone client binary
+├── internal/
+│   ├── client/               # Drone client logic
+│   ├── parser/              # Multimodal document parsers
+│   │   ├── pdf.go           # PDF parser (go-fitz)
+│   │   ├── docx.go          # DOCX parser
+│   │   ├── excel.go         # Excel parser
+│   │   ├── html.go          # HTML parser
+│   │   ├── email.go         # EML parser
+│   │   ├── dispatcher.go    # File type router
+│   │   └── chunker.go        # Text chunking
+│   ├── embeddings/          # Embedding service
+│   │   ├── embeddings.go    # Interface and factory
+│   │   ├── openai.go        # OpenAI embedder
+│   │   ├── ollama.go        # Ollama embedder
+│   │   └── mock.go          # Mock embedder
+│   ├── proto/               # Generated protobuf code
+│   ├── server/              # gRPC service implementation
+│   ├── vectordb/            # Vector database abstraction
+│   ├── queue/               # Job queue (Redis)
+│   ├── worker/              # Background workers
+│   └── jobs/                # Job handlers
+├── proto/                   # Protobuf definitions
 ├── frontend/
-│   ├── static/               # CSS, JS, images
-│   └── template/             # Go HTML templates
+│   ├── static/              # CSS, JS, images
+│   └── template/            # Go HTML templates
 ├── infra/
-│   ├── ansible/              # Configuration management
-│   ├── caddy/                # Reverse proxy config
-│   └── terraform/            # Infrastructure as Code
-├── data/                     # Persistent data (gitignored)
-├── logs/                     # Application logs (gitignored)
-├── docker-compose.yml        # Full stack deployment
-├── Dockerfile.hive-server    # Hive server container
-├── Makefile                  # Build automation
-└── go.mod                    # Go dependencies
+│   ├── ansible/             # Configuration management
+│   ├── caddy/               # Reverse proxy config
+│   └── terraform/           # Infrastructure as Code
+├── backend/                 # Legacy directory (can be removed)
+├── data/                    # Persistent data (gitignored)
+├── logs/                    # Application logs (gitignored)
+├── docker-compose.yml       # Full stack deployment
+├── Dockerfile.hive-server   # Hive server container
+├── Makefile                 # Build automation
+└── go.mod                   # Go dependencies
 ```
 
-## Next Implementation Steps
+## Implementation Status
 
-1. **PDF Processing**: Integrate real PDF library
-2. **Embeddings**: Add embedding model/API integration
-3. **Qdrant**: Complete vector database operations
-4. **Web UI**: Enhance search and results display
-5. **Error Handling**: Add comprehensive error handling
-6. **Testing**: Add unit and integration tests
-7. **Configuration**: Externalize configuration
-8. **Authentication**: Add security/auth if needed
+✅ **Completed:**
+- PDF text extraction (go-fitz/MuPDF)
+- Multimodal document parsing (PDF, DOCX, Excel, HTML, EML)
+- Embedding service with multiple backends
+- Text chunking with overlap
+- Search API endpoint
+- Temporary file filtering
+- Docker setup with CGO support
+
+⚠️ **In Progress:**
+- Qdrant API integration (structure complete, needs API verification)
+
+📋 **Next Steps:**
+1. **Qdrant Operations**: Verify and complete Qdrant client API calls
+2. **Web UI**: Enhance search results display
+3. **Document Management**: Add endpoints for viewing/deleting documents
+4. **Error Handling**: Improve error handling and retries
+5. **Testing**: Add unit and integration tests
+6. **Monitoring**: Add metrics and observability
+7. **Authentication**: Add security/auth if needed
 
