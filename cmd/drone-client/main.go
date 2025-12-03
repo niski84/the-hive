@@ -1,167 +1,128 @@
+// Copyright (c) 2025 Northbound System
+// Author: Nicholas Skitch
 package main
 
 import (
 	"context"
+	"embed"
 	"flag"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
-	"github.com/the-hive/internal/client"
-	"github.com/the-hive/internal/parser"
-	"github.com/the-hive/internal/proto"
+	"github.com/the-hive/internal/drone"
+	"github.com/the-hive/internal/drone/events"
+	"github.com/the-hive/internal/drone/watcher"
+	"github.com/the-hive/internal/drone/web"
 )
 
-// End of import block
+//go:embed ui/*
+var uiFiles embed.FS
 
 var (
-	watchDir     = flag.String("watch-dir", "./watch", "Directory to watch for files (PDF, DOCX, XLSX, HTML, EML)")
-	hiveAddr     = flag.String("hive-addr", "localhost:50051", "Hive server address")
-	pollInterval = flag.Duration("poll-interval", 5*time.Second, "Polling interval for file changes")
+	configPath = flag.String("config", "", "Path to config file (default: ~/.the-hive/config.yaml)")
+	serverAddr = flag.String("server", "", "Hive server address (overrides config)")
+	watchDirs  = flag.String("watch-dirs", "", "Comma-separated list of directories to watch (overrides config)")
+	webPort    = flag.Int("web-port", 0, "Web server port (overrides config)")
 )
 
 func main() {
 	flag.Parse()
 
-	// Validate watch directory
-	if _, err := os.Stat(*watchDir); os.IsNotExist(err) {
-		log.Printf("Watch directory does not exist, creating: %s", *watchDir)
-		if err := os.MkdirAll(*watchDir, 0755); err != nil {
-			log.Fatalf("Failed to create watch directory: %v", err)
-		}
-	}
-
-	// Connect to Hive server
-	conn, err := grpc.Dial(*hiveAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Load configuration
+	config, err := drone.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to connect to Hive server: %v", err)
-	}
-	defer conn.Close()
-
-	hiveClient := proto.NewHiveClient(conn)
-	droneClient := client.NewDroneClient(hiveClient)
-
-	// Initialize chunker for text processing
-	chunker := parser.NewChunker()
-
-	// Create file watcher
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatalf("Failed to create watcher: %v", err)
-	}
-	defer watcher.Close()
-
-	// Watch the directory
-	err = watcher.Add(*watchDir)
-	if err != nil {
-		log.Fatalf("Failed to watch directory: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	log.Printf("Drone client started. Watching directory: %s", *watchDir)
-	log.Printf("Connected to Hive server at: %s", *hiveAddr)
-	log.Printf("Supported file types: PDF, DOCX, XLSX, HTML, EML")
-
-	// Process existing files in the directory
-	go processExistingFiles(*watchDir, droneClient, chunker)
-
-	// Watch for new files
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-				// Skip temporary files
-				if parser.IsTemporaryFile(event.Name) {
-					continue
-				}
-				// Check if file type is supported
-				if parser.IsSupportedFile(event.Name) {
-					log.Printf("Detected file: %s", event.Name)
-					go processFile(event.Name, droneClient, chunker)
-				}
-			}
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("Watcher error: %v", err)
-		}
-	}
-}
-
-func processExistingFiles(dir string, droneClient *client.DroneClient, chunker *parser.Chunker) {
-	log.Printf("Scanning existing files in %s", dir)
-
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			// Skip temporary files
-			if parser.IsTemporaryFile(path) {
-				return nil
-			}
-			// Process supported file types
-			if parser.IsSupportedFile(path) {
-				processFile(path, droneClient, chunker)
+	// Apply CLI flag overrides
+	watchDirList := []string{}
+	if *watchDirs != "" {
+		// Parse comma-separated directories
+		for _, dir := range strings.Split(*watchDirs, ",") {
+			dir = strings.TrimSpace(dir)
+			if dir != "" {
+				watchDirList = append(watchDirList, dir)
 			}
 		}
-		return nil
-	})
-
-	if err != nil {
-		log.Printf("Error scanning directory: %v", err)
 	}
-}
+	drone.ApplyCLIFlags(config, *serverAddr, watchDirList, *webPort)
 
-func processFile(filePath string, droneClient *client.DroneClient, chunker *parser.Chunker) {
-	fileType := filepath.Ext(filePath)
-	log.Printf("Processing %s file: %s", fileType, filePath)
+	log.Printf("Loaded configuration:")
+	log.Printf("  Server: %s", config.Server.Address)
+	log.Printf("  Watch paths: %v", config.WatchPaths)
+	log.Printf("  Web server port: %d", config.WebServer.Port)
 
-	// Extract text using the parser dispatcher
-	text, err := parser.ParseFile(filePath)
-	if err != nil {
-		log.Printf("Failed to extract text from %s: %v", filePath, err)
-		return
-	}
-
-	if text == "" {
-		log.Printf("No text extracted from %s", filePath)
-		return
-	}
-
-	// Chunk the text
-	chunks, err := chunker.ChunkText(text)
-	if err != nil {
-		log.Printf("Failed to chunk text from %s: %v", filePath, err)
-		return
-	}
-
-	log.Printf("Extracted %d chunks from %s", len(chunks), filePath)
-
-	// Send chunks to Hive
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	documentID := filepath.Base(filePath)
-	for i, chunk := range chunks {
-		err := droneClient.IngestChunk(ctx, documentID, chunk, i, map[string]string{
-			"filename": filepath.Base(filePath),
-			"path":     filePath,
-			"filetype": fileType,
-		})
-		if err != nil {
-			log.Printf("Failed to ingest chunk %d from %s: %v", i, filePath, err)
-			continue
+	// Create event broadcaster for SSE
+	eventBroadcaster := events.NewBroadcaster()
+
+	// Get config directory for database
+	configDir := ""
+	if *configPath != "" {
+		configDir = filepath.Dir(*configPath)
+	} else {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			configDir = filepath.Join(home, ".the-hive")
+		} else {
+			configDir = "./.the-hive"
 		}
 	}
 
-	log.Printf("Successfully processed %s", filePath)
+	// Initialize file watcher manager with database support
+	watcherMgr, err := watcher.NewManager(config.WatchPaths, config.Server.Address, eventBroadcaster, configDir)
+	if err != nil {
+		log.Fatalf("Failed to initialize watcher manager: %v", err)
+	}
+
+	// Start file watcher
+	if err := watcherMgr.Start(ctx); err != nil {
+		log.Fatalf("Failed to start watcher: %v", err)
+	}
+	defer watcherMgr.Stop()
+
+	// Initialize web server
+	webServer := web.NewServer(config, watcherMgr, eventBroadcaster, uiFiles)
+
+	// Start web server
+	httpServer := &http.Server{
+		Addr:    webServer.Address(),
+		Handler: webServer.Handler(),
+	}
+
+	go func() {
+		log.Printf("Web server starting on http://%s", httpServer.Addr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Web server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	log.Printf("Drone client running. Press Ctrl+C to stop.")
+	<-sigChan
+
+	log.Printf("Shutting down...")
+
+	// Graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Error shutting down web server: %v", err)
+	}
+
+	cancel()
+	log.Printf("Shutdown complete")
 }

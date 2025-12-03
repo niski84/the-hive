@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Northbound System
+// Author: Nicholas Skitch
 package worker
 
 import (

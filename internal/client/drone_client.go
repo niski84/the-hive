@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Northbound System
+// Author: Nicholas Skitch
 package client
 
 import (
@@ -21,6 +23,7 @@ func NewDroneClient(client proto.HiveClient) *DroneClient {
 }
 
 // IngestChunk sends a chunk to the Hive server.
+// metadata should include: file_hash, ingest_type (new/update), filename, path, filetype
 func (c *DroneClient) IngestChunk(ctx context.Context, documentID, content string, chunkIndex int, metadata map[string]string) error {
 	chunk := &proto.Chunk{
 		Id:         fmt.Sprintf("%s-%d-%s", documentID, chunkIndex, uuid.New().String()),

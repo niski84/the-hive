@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Northbound System
+// Author: Nicholas Skitch
 package parser
 
 import (
@@ -10,26 +12,46 @@ import (
 func ParseFile(filePath string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 
+	var text string
+	var err error
+
 	switch ext {
 	case ".pdf":
-		return parsePDF(filePath)
+		text, err = parsePDF(filePath)
 	case ".docx":
-		return parseDOCX(filePath)
+		text, err = parseDOCX(filePath)
+	case ".txt", ".md":
+		text, err = parseText(filePath)
 	case ".xlsx", ".xls":
-		return parseExcel(filePath)
+		text, err = parseExcel(filePath)
 	case ".html", ".htm":
-		return parseHTML(filePath)
+		text, err = parseHTML(filePath)
 	case ".eml":
-		return parseEmail(filePath)
+		text, err = parseEmail(filePath)
 	default:
 		return "", fmt.Errorf("unsupported file type: %s", ext)
 	}
+
+	if err != nil {
+		return "", err
+	}
+
+	// Log text preview: character count and first 150 chars
+	charCount := len(text)
+	snippet := text
+	if len(snippet) > 150 {
+		snippet = snippet[:150] + "..."
+	}
+	fmt.Printf("[TEXT EXTRACT] %s: %d characters\n", filePath, charCount)
+	fmt.Printf("[TEXT SNIPPET] %s\n", snippet)
+
+	return text, nil
 }
 
 // IsSupportedFile checks if a file extension is supported
 func IsSupportedFile(filePath string) bool {
 	ext := strings.ToLower(filepath.Ext(filePath))
-	supported := []string{".pdf", ".docx", ".xlsx", ".xls", ".html", ".htm", ".eml"}
+	supported := []string{".pdf", ".docx", ".txt", ".md", ".xlsx", ".xls", ".html", ".htm", ".eml"}
 	for _, s := range supported {
 		if ext == s {
 			return true
@@ -53,4 +75,3 @@ func IsTemporaryFile(filePath string) bool {
 	}
 	return false
 }
-

@@ -1,0 +1,56 @@
+{{if .Matches}}
+    <div class="space-y-4">
+        <div class="text-sm text-gray-600 mb-4">
+            Found {{.Count}} result{{if ne .Count 1}}s{{end}}
+        </div>
+        {{range .Matches}}
+        <div class="bg-white p-6 rounded-lg shadow hover:shadow-md transition">
+            <div class="flex justify-between items-start mb-2">
+                <div>
+                    <h3 class="text-lg font-semibold text-gray-900">
+                        {{if .Metadata.filename}}
+                            {{.Metadata.filename}}
+                        {{else if .Metadata.filetype}}
+                            {{.Metadata.filetype}} Document
+                        {{else}}
+                            Document {{.DocumentID}}
+                        {{end}}
+                    </h3>
+                    {{if .Metadata.filepath}}
+                        <p class="text-sm text-gray-500 mt-1">{{.Metadata.filepath}}</p>
+                    {{end}}
+                </div>
+                <div class="text-right">
+                    <span class="inline-block bg-blue-100 text-blue-800 text-xs font-semibold px-2 py-1 rounded">
+                        Score: {{printf "%.3f" .Score}}
+                    </span>
+                </div>
+            </div>
+            <div class="mt-4">
+                <p class="text-gray-700 leading-relaxed">{{.Content}}</p>
+            </div>
+            {{if .Metadata}}
+            <div class="mt-4 pt-4 border-t border-gray-200">
+                <div class="flex flex-wrap gap-2 text-xs text-gray-500">
+                    {{if .Metadata.filetype}}
+                        <span class="bg-gray-100 px-2 py-1 rounded">{{.Metadata.filetype}}</span>
+                    {{end}}
+                    {{if .Metadata.chunk_index}}
+                        <span class="bg-gray-100 px-2 py-1 rounded">Chunk #{{.Metadata.chunk_index}}</span>
+                    {{end}}
+                    {{if .Metadata.page}}
+                        <span class="bg-gray-100 px-2 py-1 rounded">Page {{.Metadata.page}}</span>
+                    {{end}}
+                </div>
+            </div>
+            {{end}}
+        </div>
+        {{end}}
+    </div>
+{{else}}
+    <div class="bg-white p-8 rounded-lg shadow text-center">
+        <p class="text-gray-500 text-lg">No results found</p>
+        <p class="text-gray-400 text-sm mt-2">Try a different search query</p>
+    </div>
+{{end}}
+

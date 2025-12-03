@@ -1,0 +1,309 @@
+<!--
+Copyright (c) 2025 Northbound System
+Author: Nicholas Skitch
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Hive Drone - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .log-entry {
+            animation: slideIn 0.3s ease-out;
+        }
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <h1 class="text-3xl font-bold text-gray-900 mb-8">🐝 The Hive Drone Client</h1>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Configuration Panel -->
+            <div class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-xl font-semibold mb-4">Configuration</h2>
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Server Address</label>
+                        <input type="text" id="serverAddr" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                               placeholder="localhost:50051">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Watch Paths</label>
+                        <div id="watchPaths" class="space-y-2 mb-2"></div>
+                        <div class="flex gap-2">
+                            <input type="text" id="newPath" 
+                                   class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                                   placeholder="Add watch path...">
+                            <button onclick="addWatchPath()" 
+                                    class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                                Add
+                            </button>
+                        </div>
+                    </div>
+
+                    <button onclick="saveConfig()" 
+                            class="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                        Save Configuration
+                    </button>
+                </div>
+            </div>
+
+            <!-- Status Panel -->
+            <div class="bg-white rounded-lg shadow p-6">
+                <h2 class="text-xl font-semibold mb-4">Status</h2>
+                <div id="status" class="space-y-2">
+                    <p class="text-gray-600">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Log -->
+        <div class="mt-6 bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">Live Log</h2>
+            <div id="logContainer" class="bg-gray-900 text-green-400 font-mono text-sm p-4 rounded max-h-96 overflow-y-auto">
+                <div class="log-entry">Waiting for events...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+
+        // Load configuration on page load
+        async function loadConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const config = await response.json();
+                
+                document.getElementById('serverAddr').value = config.Server?.Address || config.server?.address || '';
+                // Handle both camelCase and snake_case from API
+                const paths = config.WatchPaths || config.watch_paths || [];
+                updateWatchPaths(paths);
+            } catch (error) {
+                console.error('Failed to load config:', error);
+            }
+        }
+
+        // Load status
+        async function loadStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const status = await response.json();
+                
+                const statusDiv = document.getElementById('status');
+                statusDiv.innerHTML = `
+                    <p><strong>Watching:</strong> ${status.watching_paths?.length || 0} paths</p>
+                    <p><strong>Total Files:</strong> ${status.total_files || 0}</p>
+                    <p><strong>Processed:</strong> ${status.processed || 0}</p>
+                    <p><strong>Errors:</strong> ${status.errors || 0}</p>
+                `;
+            } catch (error) {
+                console.error('Failed to load status:', error);
+            }
+        }
+
+        // Update watch paths display
+        function updateWatchPaths(paths) {
+            const container = document.getElementById('watchPaths');
+            if (!paths || paths.length === 0) {
+                container.innerHTML = '<p class="text-sm text-gray-500 italic">No watch paths configured</p>';
+                return;
+            }
+            container.innerHTML = paths.map((path, index) => {
+                // Escape path for HTML attributes (for onclick)
+                const escapedForAttr = path.replace(/'/g, "\\'").replace(/"/g, "&quot;").replace(/\n/g, "").replace(/\r/g, "");
+                // Escape for HTML display
+                const escapedForDisplay = path.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                return `
+                <div class="flex items-center justify-between bg-gray-50 px-3 py-2 rounded mb-2" data-path="${escapedForAttr}">
+                    <span class="text-sm font-mono text-gray-700 flex-1 truncate" title="${escapedForDisplay}">${escapedForDisplay}</span>
+                    <button onclick="removeWatchPath('${escapedForAttr}')" 
+                            class="ml-2 px-2 py-1 text-red-600 hover:text-red-800 hover:bg-red-50 text-sm font-semibold rounded transition">
+                        Remove
+                    </button>
+                </div>
+            `;
+            }).join('');
+        }
+
+        // Add watch path
+        async function addWatchPath() {
+            const input = document.getElementById('newPath');
+            const path = input.value.trim();
+            if (!path) {
+                alert('Please enter a path');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/watch-paths/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({path: path})
+                });
+
+                if (response.ok) {
+                    input.value = '';
+                    // Reload config to show updated list
+                    await loadConfig();
+                    await loadStatus();
+                    // Show success message in log
+                    const logContainer = document.getElementById('logContainer');
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'log-entry text-blue-400';
+                    logEntry.textContent = `[${new Date().toLocaleTimeString()}] Added watch path: ${path}`;
+                    logContainer.insertBefore(logEntry, logContainer.firstChild);
+                } else {
+                    const errorText = await response.text();
+                    alert(`Failed to add watch path: ${errorText}`);
+                }
+            } catch (error) {
+                console.error('Error adding watch path:', error);
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        // Remove watch path
+        async function removeWatchPath(path) {
+            if (!confirm(`Remove watch path: ${path}?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/watch-paths/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({path: path})
+                });
+
+                if (response.ok) {
+                    await loadConfig();
+                    await loadStatus();
+                    // Show message in log
+                    const logContainer = document.getElementById('logContainer');
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'log-entry text-yellow-400';
+                    logEntry.textContent = `[${new Date().toLocaleTimeString()}] Removed watch path: ${path}`;
+                    logContainer.insertBefore(logEntry, logContainer.firstChild);
+                } else {
+                    const errorText = await response.text();
+                    alert(`Failed to remove watch path: ${errorText}`);
+                }
+            } catch (error) {
+                console.error('Error removing watch path:', error);
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        // Save configuration
+        async function saveConfig() {
+            const serverAddr = document.getElementById('serverAddr').value;
+            // Get paths from the displayed list
+            const paths = Array.from(document.querySelectorAll('#watchPaths .text-sm'))
+                .map(el => el.textContent.trim())
+                .filter(p => p);
+
+            try {
+                const response = await fetch('/api/config/save', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        Server: {Address: serverAddr},
+                        WatchPaths: paths,
+                        WebServer: {Port: 9091}
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Configuration saved! Watcher will reload.');
+                    await loadConfig();
+                    await loadStatus();
+                } else {
+                    const errorText = await response.text();
+                    alert(`Failed to save configuration: ${errorText}`);
+                }
+            } catch (error) {
+                console.error('Error saving config:', error);
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        // Connect to event stream
+        function connectEventStream() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/api/stream');
+            const logContainer = document.getElementById('logContainer');
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    const timestamp = new Date(data.timestamp).toLocaleTimeString();
+                    
+                    let className = 'text-green-400';
+                    let icon = '📄';
+                    if (data.type === 'file_error') {
+                        className = 'text-red-400';
+                        icon = '❌';
+                    } else if (data.type === 'file_complete') {
+                        className = 'text-blue-400';
+                        icon = '✅';
+                    } else if (data.type === 'file_detected') {
+                        className = 'text-yellow-400';
+                        icon = '👁️';
+                    } else if (data.type === 'file_processing') {
+                        className = 'text-cyan-400';
+                        icon = '⚙️';
+                    }
+
+                    const logEntry = document.createElement('div');
+                    logEntry.className = `log-entry ${className}`;
+                    const chunksInfo = data.chunks ? ` (${data.chunks} chunks)` : '';
+                    logEntry.textContent = `[${timestamp}] ${icon} ${data.message}${chunksInfo}`;
+                    
+                    logContainer.insertBefore(logEntry, logContainer.firstChild);
+                    
+                    // Keep only last 100 entries
+                    while (logContainer.children.length > 100) {
+                        logContainer.removeChild(logContainer.lastChild);
+                    }
+                } catch (error) {
+                    console.error('Error parsing event:', error, event.data);
+                }
+            };
+
+            eventSource.onerror = function(error) {
+                console.error('EventSource error:', error);
+                // Reconnect after 3 seconds
+                setTimeout(connectEventStream, 3000);
+            };
+        }
+
+        // Initialize
+        loadConfig();
+        loadStatus();
+        connectEventStream();
+
+        // Refresh status every 5 seconds
+        setInterval(loadStatus, 5000);
+    </script>
+</body>
+</html>
+

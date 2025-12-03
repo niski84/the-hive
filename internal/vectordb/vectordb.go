@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Northbound System
+// Author: Nicholas Skitch
 package vectordb
 
 import (
@@ -7,6 +9,7 @@ import (
 	"log"
 
 	qdrant "github.com/qdrant/go-client/qdrant"
+	"google.golang.org/grpc"
 )
 
 // Match represents a vector search hit.
@@ -22,29 +25,37 @@ type VectorDB interface {
 	Upsert(ctx context.Context, id string, vector []float32, metadata map[string]string) error
 	Search(ctx context.Context, queryVector []float32, topK int) ([]Match, error)
 	Delete(ctx context.Context, id string) error
+	GetPointCount(ctx context.Context) (int, error)
 }
 
-// QdrantVectorDB is a thin wrapper around the Qdrant client.
+// QdrantVectorDB is a thin wrapper around the Qdrant service clients.
 type QdrantVectorDB struct {
-	client     qdrant.QdrantClient
-	collection string
-	dimension  int
+	collectionsSvc qdrant.CollectionsClient
+	pointsSvc      qdrant.PointsClient
+	collection     string
+	dimension      int
 }
 
 // NewQdrantVectorDB constructs a new wrapper and ensures the collection exists.
-func NewQdrantVectorDB(client qdrant.QdrantClient) (*QdrantVectorDB, error) {
-	if client == nil {
-		return nil, errors.New("qdrant client is required")
+// It accepts the gRPC connection to create service clients directly.
+func NewQdrantVectorDB(conn *grpc.ClientConn) (*QdrantVectorDB, error) {
+	if conn == nil {
+		return nil, errors.New("gRPC connection is required")
 	}
 
-	collectionName := "hive_chunks"
+	collectionName := "the_hive"
 	// Default dimension - will be updated when first vector is inserted
 	defaultDim := 1536
 
+	// Create service clients from the gRPC connection
+	collectionsSvc := qdrant.NewCollectionsClient(conn)
+	pointsSvc := qdrant.NewPointsClient(conn)
+
 	vdb := &QdrantVectorDB{
-		client:     client,
-		collection: collectionName,
-		dimension:  defaultDim,
+		collectionsSvc: collectionsSvc,
+		pointsSvc:      pointsSvc,
+		collection:     collectionName,
+		dimension:      defaultDim,
 	}
 
 	// Ensure collection exists
@@ -56,15 +67,42 @@ func NewQdrantVectorDB(client qdrant.QdrantClient) (*QdrantVectorDB, error) {
 }
 
 // ensureCollection creates the collection if it doesn't exist.
-// The Qdrant Go client API structure needs verification - this is a minimal implementation.
 func (q *QdrantVectorDB) ensureCollection(ctx context.Context, dim int) error {
 	log.Printf("Ensuring Qdrant collection %s exists with dimension %d", q.collection, dim)
 
-	// Note: The actual Qdrant Go client v1.7.0 API needs to be verified.
-	// The client created via qdrant.NewQdrantClient() may expose services differently.
-	// For now, we skip explicit collection creation and handle errors on first use.
-	// Collection creation will happen automatically on first upsert, or you can
-	// create it manually via Qdrant's REST API or admin tools.
+	// Check if collection exists
+	collections, err := q.collectionsSvc.List(ctx, &qdrant.ListCollectionsRequest{})
+	if err != nil {
+		return fmt.Errorf("failed to list collections: %w", err)
+	}
+
+	// Check if our collection already exists
+	exists := false
+	for _, coll := range collections.Collections {
+		if coll.Name == q.collection {
+			exists = true
+			break
+		}
+	}
+
+	if !exists {
+		// Create the collection
+		_, err = q.collectionsSvc.Create(ctx, &qdrant.CreateCollection{
+			CollectionName: q.collection,
+			VectorsConfig: &qdrant.VectorsConfig{
+				Config: &qdrant.VectorsConfig_Params{
+					Params: &qdrant.VectorParams{
+						Size:     uint64(dim),
+						Distance: qdrant.Distance_Cosine,
+					},
+				},
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create collection: %w", err)
+		}
+		log.Printf("Created Qdrant collection %s with dimension %d", q.collection, dim)
+	}
 
 	q.dimension = dim
 	return nil
@@ -101,35 +139,37 @@ func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32
 		}
 	}
 
-	// Convert float32 to float32 for Qdrant (it uses float32)
-	points := []*qdrant.PointStruct{
-		{
-			Id: &qdrant.PointId{
-				PointIdOptions: &qdrant.PointId_Uuid{
-					Uuid: id,
-				},
-			},
-			Vectors: &qdrant.Vectors{
-				VectorsOptions: &qdrant.Vectors_Vector{
-					Vector: &qdrant.Vector{
-						Data: vector,
-					},
-				},
-			},
-			Payload: payload,
+	// Convert UUID string to Qdrant PointId
+	// Try to parse as UUID first, otherwise use as string UUID
+	pointID := &qdrant.PointId{
+		PointIdOptions: &qdrant.PointId_Uuid{
+			Uuid: id,
 		},
 	}
 
-	// TODO: Implement actual Qdrant Upsert call
-	// The Qdrant Go client API needs verification. Check the client structure:
-	// - May be: q.client.Points().Upsert(ctx, ...)
-	// - Or: Direct gRPC service client access
-	// - Or: Client wrapper methods
-	//
-	// For now, return an error indicating API needs implementation
-	// Once the correct API is identified, replace this with the actual call
-	_ = points // suppress unused variable
-	return fmt.Errorf("Qdrant Upsert not implemented - verify client API: github.com/qdrant/go-client")
+	// Create point struct
+	point := &qdrant.PointStruct{
+		Id: pointID,
+		Vectors: &qdrant.Vectors{
+			VectorsOptions: &qdrant.Vectors_Vector{
+				Vector: &qdrant.Vector{
+					Data: vector,
+				},
+			},
+		},
+		Payload: payload,
+	}
+
+	// Upsert the point
+	_, err := q.pointsSvc.Upsert(ctx, &qdrant.UpsertPoints{
+		CollectionName: q.collection,
+		Points:         []*qdrant.PointStruct{point},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upsert point: %w", err)
+	}
+
+	return nil
 }
 
 // Search performs a similarity search.
@@ -142,16 +182,97 @@ func (q *QdrantVectorDB) Search(ctx context.Context, queryVector []float32, topK
 		topK = 10
 	}
 
-	// TODO: Implement actual Qdrant Search call
-	// Verify the client API structure and implement the search
-	_ = queryVector // suppress unused variable
-	_ = topK
-	return nil, fmt.Errorf("Qdrant Search not implemented - verify client API: github.com/qdrant/go-client")
+	// Perform search
+	searchResult, err := q.pointsSvc.Search(ctx, &qdrant.SearchPoints{
+		CollectionName: q.collection,
+		Vector:         queryVector,
+		Limit:          uint64(topK),
+		WithPayload:    &qdrant.WithPayloadSelector{SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: true}},
+		WithVectors:    &qdrant.WithVectorsSelector{SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: false}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search: %w", err)
+	}
+
+	// Convert results to Match structs
+	matches := make([]Match, 0, len(searchResult.Result))
+	for _, scoredPoint := range searchResult.Result {
+		// Extract point ID
+		var pointID string
+		if scoredPoint.Id != nil {
+			if uuid := scoredPoint.Id.GetUuid(); uuid != "" {
+				pointID = uuid
+			} else if num := scoredPoint.Id.GetNum(); num != 0 {
+				pointID = fmt.Sprintf("%d", num)
+			}
+		}
+
+		// Extract metadata from payload
+		metadata := make(map[string]string)
+		var documentID string
+		if scoredPoint.Payload != nil {
+			for key, value := range scoredPoint.Payload {
+				if strValue := value.GetStringValue(); strValue != "" {
+					metadata[key] = strValue
+					if key == "document_id" {
+						documentID = strValue
+					}
+				}
+			}
+		}
+
+		matches = append(matches, Match{
+			ID:         pointID,
+			DocumentID: documentID,
+			Score:      scoredPoint.Score,
+			Metadata:   metadata,
+		})
+	}
+
+	return matches, nil
+}
+
+// GetPointCount returns the number of points in the collection
+func (q *QdrantVectorDB) GetPointCount(ctx context.Context) (int, error) {
+	// Get collection info
+	info, err := q.collectionsSvc.Get(ctx, &qdrant.GetCollectionInfoRequest{
+		CollectionName: q.collection,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to get collection info: %w", err)
+	}
+
+	if info.Result == nil {
+		return 0, nil
+	}
+
+	// Extract point count from collection info
+	// PointsCount is a *uint64
+	if info.Result.PointsCount != nil {
+		return int(*info.Result.PointsCount), nil
+	}
+
+	// Fallback: collection exists but may be empty
+	return 0, nil
 }
 
 // Delete removes a vector from the collection.
 func (q *QdrantVectorDB) Delete(ctx context.Context, id string) error {
-	// TODO: Implement actual Qdrant Delete call
-	_ = id // suppress unused variable
-	return fmt.Errorf("Qdrant Delete not implemented - verify client API: github.com/qdrant/go-client")
+	// Convert UUID string to Qdrant PointId
+	pointID := &qdrant.PointId{
+		PointIdOptions: &qdrant.PointId_Uuid{
+			Uuid: id,
+		},
+	}
+
+	// Delete the point
+	_, err := q.pointsSvc.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: q.collection,
+		Points:         &qdrant.PointsSelector{PointsSelectorOneOf: &qdrant.PointsSelector_Points{Points: &qdrant.PointsIdsList{Ids: []*qdrant.PointId{pointID}}}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete point: %w", err)
+	}
+
+	return nil
 }
