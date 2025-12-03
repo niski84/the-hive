@@ -8,19 +8,23 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/google/uuid"
 	"github.com/spf13/viper"
 )
 
 // Config holds the drone client configuration
 type Config struct {
-	Server      ServerConfig   `mapstructure:"server"`
-	WatchPaths  []string       `mapstructure:"watch_paths"`
-	WebServer   WebServerConfig `mapstructure:"web_server"`
+	ClientID          string          `mapstructure:"client_id"`
+	Server            ServerConfig    `mapstructure:"server"`
+	GrpcServerAddress string          `mapstructure:"grpc_server_address"`
+	WatchPaths        []string        `mapstructure:"watch_paths"`
+	WebServer         WebServerConfig `mapstructure:"web_server"`
+	APIKey            string          `mapstructure:"api_key"`
 }
 
 // ServerConfig holds Hive server connection settings
 type ServerConfig struct {
-	Address string `mapstructure:"address"`
+	Address string `mapstructure:"address"` // HTTP address for WebSocket/health checks
 }
 
 // WebServerConfig holds web server settings
@@ -34,9 +38,11 @@ func LoadConfig(configPath string) (*Config, error) {
 	viper.SetConfigName("config")
 
 	// Set default values
-	viper.SetDefault("server.address", "localhost:50051")
+	viper.SetDefault("server.address", "http://localhost:8081")
+	viper.SetDefault("grpc_server_address", "localhost:50051")
 	viper.SetDefault("watch_paths", []string{"./watch"})
 	viper.SetDefault("web_server.port", 9090)
+	// Note: client_id will be generated if missing, not set as default
 
 	// If config path is provided, use it
 	if configPath != "" {
@@ -95,6 +101,37 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Set smart defaults for server URL
+	if config.Server.Address == "" {
+		config.Server.Address = "http://localhost:8081"
+		log.Printf("Server URL was empty, defaulting to: %s", config.Server.Address)
+	}
+
+	// Set smart defaults for gRPC server address
+	if config.GrpcServerAddress == "" {
+		config.GrpcServerAddress = "localhost:50051"
+		log.Printf("gRPC Server Address was empty, defaulting to: %s", config.GrpcServerAddress)
+	}
+
+	// Generate client_id if missing
+	if config.ClientID == "" {
+		config.ClientID = uuid.New().String()
+		log.Printf("Generated new client ID: %s", config.ClientID)
+
+		// Save the generated client_id to config file
+		configFile := viper.ConfigFileUsed()
+		if configFile != "" {
+			viper.Set("client_id", config.ClientID)
+			if err := viper.WriteConfig(); err != nil {
+				log.Printf("Warning: Failed to save client_id to config file: %v", err)
+			} else {
+				log.Printf("Saved client_id to config file")
+			}
+		}
+	} else {
+		log.Printf("Using existing client ID: %s", config.ClientID)
+	}
+
 	return &config, nil
 }
 
@@ -111,7 +148,10 @@ func SaveConfig(config *Config, configPath string) error {
 	}
 
 	// Set values
+	viper.Set("client_id", config.ClientID)
 	viper.Set("server.address", config.Server.Address)
+	viper.Set("grpc_server_address", config.GrpcServerAddress)
+	viper.Set("api_key", config.APIKey)
 	viper.Set("watch_paths", config.WatchPaths)
 	viper.Set("web_server.port", config.WebServer.Port)
 
@@ -126,9 +166,14 @@ func SaveConfig(config *Config, configPath string) error {
 // generateDefaultConfig creates a default configuration file
 func generateDefaultConfig(configFile string) error {
 	defaultConfig := `# The Hive Drone Client Configuration
+# client_id will be auto-generated on first run
 
 server:
-  address: "localhost:50051"  # Hive server gRPC address
+  address: "http://localhost:8081"  # Hive server HTTP address (for WebSocket/health checks)
+
+grpc_server_address: "localhost:50051"  # Hive server gRPC address (for ingestion)
+
+api_key: ""  # API key for authentication (get from server settings)
 
 watch_paths:
   - "./watch"  # Directories to watch for files
@@ -157,4 +202,3 @@ func ApplyCLIFlags(config *Config, serverAddr string, watchDirs []string, webPor
 		config.WebServer.Port = webPort
 	}
 }
-

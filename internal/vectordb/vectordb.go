@@ -4,6 +4,7 @@ package vectordb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -26,6 +27,7 @@ type VectorDB interface {
 	Search(ctx context.Context, queryVector []float32, topK int) ([]Match, error)
 	Delete(ctx context.Context, id string) error
 	GetPointCount(ctx context.Context) (int, error)
+	UpdatePayload(ctx context.Context, id string, tags []string) error
 }
 
 // QdrantVectorDB is a thin wrapper around the Qdrant service clients.
@@ -140,10 +142,11 @@ func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32
 	}
 
 	// Convert UUID string to Qdrant PointId
-	// Try to parse as UUID first, otherwise use as string UUID
+	// Qdrant requires a valid UUID string format
+	// Validate that id is a valid UUID format before passing to Qdrant
 	pointID := &qdrant.PointId{
 		PointIdOptions: &qdrant.PointId_Uuid{
-			Uuid: id,
+			Uuid: id, // id should already be a valid UUID string from deterministic generation
 		},
 	}
 
@@ -168,6 +171,9 @@ func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32
 	if err != nil {
 		return fmt.Errorf("failed to upsert point: %w", err)
 	}
+
+	// Log success for watchdog monitoring
+	log.Printf("vector upsert success for chunk %s", id)
 
 	return nil
 }
@@ -217,8 +223,18 @@ func (q *QdrantVectorDB) Search(ctx context.Context, queryVector []float32, topK
 					if key == "document_id" {
 						documentID = strValue
 					}
+				} else {
+					// Log if we're skipping non-string values (for debugging)
+					log.Printf("Skipping non-string payload key: %s (type: %T)", key, value)
 				}
 			}
+		} else {
+			log.Printf("Warning: Payload is nil for point %s", pointID)
+		}
+		
+		// Log if content is missing (for debugging)
+		if metadata["content"] == "" {
+			log.Printf("Warning: Content missing in metadata for point %s. Available keys: %v", pointID, getMetadataKeys(metadata))
 		}
 
 		matches = append(matches, Match{
@@ -256,6 +272,71 @@ func (q *QdrantVectorDB) GetPointCount(ctx context.Context) (int, error) {
 	return 0, nil
 }
 
+// UpdatePayload updates the payload (metadata) of an existing point
+func (q *QdrantVectorDB) UpdatePayload(ctx context.Context, id string, tags []string) error {
+	// Convert string ID to Qdrant PointId
+	var pointID *qdrant.PointId
+
+	// Check if it's a valid UUID format (simplified check)
+	if len(id) > 20 {
+		// Assume UUID format
+		pointID = &qdrant.PointId{
+			PointIdOptions: &qdrant.PointId_Uuid{
+				Uuid: id,
+			},
+		}
+	} else {
+		// Try numeric
+		var numID uint64
+		if _, err := fmt.Sscanf(id, "%d", &numID); err == nil {
+			pointID = &qdrant.PointId{
+				PointIdOptions: &qdrant.PointId_Num{
+					Num: numID,
+				},
+			}
+		} else {
+			// Fallback: use as string UUID
+			pointID = &qdrant.PointId{
+				PointIdOptions: &qdrant.PointId_Uuid{
+					Uuid: id,
+				},
+			}
+		}
+	}
+
+	// Prepare tags payload
+	payload := make(map[string]*qdrant.Value)
+
+	// Convert tags to JSON array string for storage
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tags: %w", err)
+	}
+
+	payload["tags"] = &qdrant.Value{
+		Kind: &qdrant.Value_StringValue{StringValue: string(tagsJSON)},
+	}
+
+	// Also add individual tag fields for easier querying
+	for i, tag := range tags {
+		payload[fmt.Sprintf("tag_%d", i)] = &qdrant.Value{
+			Kind: &qdrant.Value_StringValue{StringValue: tag},
+		}
+	}
+
+	// Use SetPayload to update existing point
+	_, err = q.pointsSvc.SetPayload(ctx, &qdrant.SetPayloadPoints{
+		CollectionName: q.collection,
+		Payload:        payload,
+		PointsSelector: &qdrant.PointsSelector{PointsSelectorOneOf: &qdrant.PointsSelector_Points{Points: &qdrant.PointsIdsList{Ids: []*qdrant.PointId{pointID}}}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update payload: %w", err)
+	}
+
+	return nil
+}
+
 // Delete removes a vector from the collection.
 func (q *QdrantVectorDB) Delete(ctx context.Context, id string) error {
 	// Convert UUID string to Qdrant PointId
@@ -276,3 +357,13 @@ func (q *QdrantVectorDB) Delete(ctx context.Context, id string) error {
 
 	return nil
 }
+
+// getMetadataKeys returns all keys from metadata map (helper for debugging)
+func getMetadataKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+

@@ -35,12 +35,14 @@ func HandleStats(w http.ResponseWriter, r *http.Request, vectorDB vectordb.Vecto
 	if vectorDB != nil {
 		count, err := getVectorCount(r.Context(), vectorDB)
 		if err != nil {
-			log.Printf("Failed to get vector count: %v", err)
+			log.Printf("[ERROR] Failed to fetch Qdrant stats: %v", err)
 			stats.VectorsInMemory = -1 // Error indicator
 		} else {
 			stats.VectorsInMemory = count
+			log.Printf("[DEBUG] Qdrant stats: %d vectors in collection 'the_hive'", count)
 		}
 	} else {
+		log.Printf("[WARN] Stats: vectorDB is nil, using mock or not initialized")
 		stats.VectorsInMemory = 0
 	}
 
@@ -61,8 +63,18 @@ func HandleStats(w http.ResponseWriter, r *http.Request, vectorDB vectordb.Vecto
 		stats.DatabaseStatus = "not_initialized"
 	}
 
+	// Get trial days from metadata store (if available)
+	// For now, fallback to old method if metadataStore is not available
+	trialDays := GetTrialDays()
+
+	response := map[string]interface{}{
+		"vectors_in_memory": stats.VectorsInMemory,
+		"database_status":   stats.DatabaseStatus,
+		"trial_days":        trialDays,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	json.NewEncoder(w).Encode(response)
 }
 
 // getVectorCount gets the point count from the VectorDB

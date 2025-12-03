@@ -8,6 +8,7 @@ Author: Nicholas Skitch
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>The Hive - Vector Search</title>
+    <!-- Tailwind CSS CDN - Development environment -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .result-card {
@@ -72,6 +73,7 @@ Author: Nicholas Skitch
         const resultsContainer = document.getElementById('resultsContainer');
         const emptyState = document.getElementById('emptyState');
 
+
         // Handle Enter key press
         searchInput.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
@@ -105,9 +107,20 @@ Author: Nicholas Skitch
                     })
                 });
 
+                console.log('Search response status:', response.status, response.statusText);
+
                 if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.error || 'Search failed');
+                    let errorMessage = 'Search failed';
+                    try {
+                        const error = await response.json();
+                        errorMessage = error.error || error.message || errorMessage;
+                        console.error('Search error response:', error);
+                    } catch (e) {
+                        const errorText = await response.text();
+                        console.error('Search error (non-JSON):', errorText);
+                        errorMessage = errorText || errorMessage;
+                    }
+                    throw new Error(errorMessage);
                 }
 
                 const data = await response.json();

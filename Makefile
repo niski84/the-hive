@@ -4,9 +4,9 @@
 proto:
 	@echo "Generating protobuf Go code..."
 	@mkdir -p internal/proto
-	@protoc --go_out=. --go_opt=paths=source_relative \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		proto/hive.proto
+	@cd proto && protoc --go_out=../internal/proto --go_opt=paths=source_relative \
+		--go-grpc_out=../internal/proto --go-grpc_opt=paths=source_relative \
+		hive.proto
 
 # Generate all code
 generate: proto

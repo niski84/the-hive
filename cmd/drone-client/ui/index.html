@@ -27,7 +27,16 @@ Author: Nicholas Skitch
 </head>
 <body class="bg-gray-50 min-h-screen">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <h1 class="text-3xl font-bold text-gray-900 mb-8">🐝 The Hive Drone Client</h1>
+        <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-gray-900">🐝 The Hive Drone Client</h1>
+            <div class="flex items-center gap-4">
+                <a href="/settings" class="text-blue-600 hover:text-blue-800 font-medium">⚙️ Settings</a>
+                <span id="serverStatus" class="px-3 py-1 rounded-full text-sm font-semibold bg-gray-200 text-gray-700">
+                    <span class="status-dot inline-block w-2 h-2 rounded-full mr-2 bg-gray-500"></span>
+                    <span class="status-text">Checking...</span>
+                </span>
+            </div>
+        </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <!-- Configuration Panel -->
@@ -72,6 +81,14 @@ Author: Nicholas Skitch
             </div>
         </div>
 
+        <!-- Notifications Panel -->
+        <div class="mt-6 bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">🔔 Notifications</h2>
+            <div id="notificationsContainer" class="space-y-2 max-h-64 overflow-y-auto">
+                <p class="text-gray-500 text-sm italic">No notifications yet</p>
+            </div>
+        </div>
+
         <!-- Live Log -->
         <div class="mt-6 bg-white rounded-lg shadow p-6">
             <h2 class="text-xl font-semibold mb-4">Live Log</h2>
@@ -83,6 +100,7 @@ Author: Nicholas Skitch
 
     <script>
         let eventSource = null;
+        let wasOffline = false; // Track if server was previously offline to prevent spam
 
         // Load configuration on page load
         async function loadConfig() {
@@ -255,7 +273,17 @@ Author: Nicholas Skitch
             eventSource.onmessage = function(event) {
                 try {
                     const data = JSON.parse(event.data);
-                    const timestamp = new Date(data.timestamp).toLocaleTimeString();
+                    // Handle missing or invalid timestamps
+                    let timestamp;
+                    if (data.timestamp && data.timestamp !== null && data.timestamp !== undefined) {
+                        try {
+                            timestamp = new Date(data.timestamp).toLocaleTimeString();
+                        } catch (e) {
+                            timestamp = new Date().toLocaleTimeString();
+                        }
+                    } else {
+                        timestamp = new Date().toLocaleTimeString();
+                    }
                     
                     let className = 'text-green-400';
                     let icon = '📄';
@@ -271,6 +299,11 @@ Author: Nicholas Skitch
                     } else if (data.type === 'file_processing') {
                         className = 'text-cyan-400';
                         icon = '⚙️';
+                    } else if (data.type === 'notification') {
+                        className = 'text-purple-400';
+                        icon = '🔔';
+                        // Also add to notifications panel
+                        addNotification(data);
                     }
 
                     const logEntry = document.createElement('div');
@@ -296,6 +329,53 @@ Author: Nicholas Skitch
             };
         }
 
+        // Add notification to notifications panel
+        function addNotification(data) {
+            const container = document.getElementById('notificationsContainer');
+            
+            // Remove "No notifications yet" message if present
+            const noNotifications = container.querySelector('.text-gray-500');
+            if (noNotifications) {
+                noNotifications.remove();
+            }
+
+            const notification = document.createElement('div');
+            notification.className = 'bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded';
+            
+            let levelClass = 'text-yellow-800';
+            if (data.level === 'critical') {
+                notification.className = 'bg-red-50 border-l-4 border-red-400 p-3 rounded';
+                levelClass = 'text-red-800';
+            } else if (data.level === 'warning') {
+                notification.className = 'bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded';
+                levelClass = 'text-yellow-800';
+            } else {
+                notification.className = 'bg-blue-50 border-l-4 border-blue-400 p-3 rounded';
+                levelClass = 'text-blue-800';
+            }
+
+            notification.innerHTML = `
+                <div class="flex items-start">
+                    <div class="flex-1">
+                        <p class="font-semibold ${levelClass}">🔔 ${data.type || 'Notification'}</p>
+                        <p class="text-sm text-gray-700 mt-1">${data.message}</p>
+                        <p class="text-xs text-gray-500 mt-1">${new Date().toLocaleString()}</p>
+                    </div>
+                    <button onclick="this.parentElement.parentElement.remove()" 
+                            class="ml-2 text-gray-400 hover:text-gray-600">
+                        ✕
+                    </button>
+                </div>
+            `;
+
+            container.insertBefore(notification, container.firstChild);
+
+            // Keep only last 20 notifications
+            while (container.children.length > 20) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
         // Initialize
         loadConfig();
         loadStatus();
@@ -303,6 +383,83 @@ Author: Nicholas Skitch
 
         // Refresh status every 5 seconds
         setInterval(loadStatus, 5000);
+
+        // Track notification state to prevent spam
+        let notificationSent = false;
+
+        // Server status monitoring with timeout
+        function updateServerStatus() {
+            const statusEl = document.getElementById('serverStatus');
+            if (!statusEl) return;
+            
+            const dotEl = statusEl.querySelector('.status-dot');
+            const textEl = statusEl.querySelector('.status-text');
+            
+            // Create AbortController for timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            fetch('/api/server-status', { signal: controller.signal })
+                .then(response => {
+                    clearTimeout(timeoutId);
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.status === 'up') {
+                        // Server is online - reset notification flag
+                        if (wasOffline) {
+                            // Server just came back online
+                            wasOffline = false;
+                            notificationSent = false; // Reset notification flag when back online
+                        }
+                        statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-green-200 text-green-700';
+                        dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-green-500';
+                        textEl.textContent = 'Server Online';
+                    } else if (data.status === 'down') {
+                        // Server is offline - only show notification if not already sent
+                        if (!wasOffline) {
+                            wasOffline = true;
+                        }
+                        // Only fire notification if we haven't sent one yet
+                        if (!notificationSent) {
+                            notificationSent = true;
+                            // Could show a notification here if desired, but only once
+                        }
+                        statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-red-200 text-red-700';
+                        dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-red-500';
+                        textEl.textContent = 'Server Offline';
+                    } else if (data.status === 'config_required') {
+                        statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-orange-200 text-orange-700';
+                        dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-orange-500';
+                        textEl.textContent = 'Config Required';
+                    } else {
+                        statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-gray-200 text-gray-700';
+                        dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-gray-500';
+                        textEl.textContent = 'Checking...';
+                    }
+                })
+                .catch(err => {
+                    clearTimeout(timeoutId);
+                    console.error('Failed to fetch server status:', err);
+                    
+                    // On timeout or error, set to offline - only notify if not already sent
+                    if (!wasOffline) {
+                        wasOffline = true;
+                    }
+                    // Only fire notification if we haven't sent one yet
+                    if (!notificationSent) {
+                        notificationSent = true;
+                        // Could show a notification here if desired, but only once
+                    }
+                    statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-red-200 text-red-700';
+                    dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-red-500';
+                    textEl.textContent = 'Server Offline';
+                });
+        }
+
+        // Update server status every 2 seconds
+        setInterval(updateServerStatus, 2000);
+        updateServerStatus(); // Initial update
     </script>
 </body>
 </html>

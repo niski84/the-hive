@@ -1,0 +1,47 @@
+<!--
+Copyright (c) 2025 Northbound System
+Author: Nicholas Skitch
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ block "title" . }}The Hive{{ end }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    {{ block "head" . }}{{ end }}
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col">
+    <!-- Navbar -->
+    <nav class="bg-white shadow-md">
+        <div class="container mx-auto px-4">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center space-x-8">
+                    <a href="/" class="text-xl font-bold text-gray-900">🐝 The Hive</a>
+                    <div class="flex space-x-4">
+                        <a href="/" class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium">Search</a>
+                        <a href="/timeline" class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium">Timeline</a>
+                        <a href="/graph" class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium">Graph</a>
+                        <a href="/settings" class="text-gray-700 hover:text-blue-600 px-3 py-2 rounded-md text-sm font-medium">Settings</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Content -->
+    <main class="flex-1 container mx-auto px-4 py-8">
+        {{ block "content" . }}{{ end }}
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t mt-8">
+        <div class="container mx-auto px-4 py-4">
+            <p id="evaluationStatus" class="text-center text-sm text-gray-500">Evaluation Mode: Loading...</p>
+        </div>
+    </footer>
+
+    {{ block "scripts" . }}{{ end }}
+</body>
+</html>
+

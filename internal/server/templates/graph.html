@@ -1,0 +1,183 @@
+<!--
+Copyright (c) 2025 Northbound System
+Author: Nicholas Skitch
+-->
+{{ define "title" }}Graph - The Hive{{ end }}
+
+{{ define "head" }}
+{{ end }}
+
+{{ define "content" }}
+<div class="max-w-6xl mx-auto">
+    <h1 class="text-3xl font-bold text-gray-900 mb-6">🕸️ Document Graph</h1>
+    <p class="text-gray-600 mb-4">Visualize relationships and contradictions between documents</p>
+    
+    <div id="network" class="bg-white rounded-lg shadow-md p-6" style="height: 600px;"></div>
+    
+    <!-- Edge Details -->
+    <div class="mt-6 bg-white rounded-lg shadow-md p-6">
+        <h2 class="text-xl font-semibold mb-4">Edge Details</h2>
+        <div id="edgeDetails" class="text-gray-500">
+            Click on an edge to see details
+        </div>
+    </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script>
+    // Initialize network graph
+    let network = null;
+    let nodes = null;
+    let edges = null;
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        const container = document.getElementById('network');
+        
+        // Create empty datasets
+        nodes = new vis.DataSet([]);
+        edges = new vis.DataSet([]);
+        
+        const data = { nodes: nodes, edges: edges };
+        
+        const options = {
+            nodes: {
+                shape: 'dot',
+                size: 20,
+                font: {
+                    size: 14
+                },
+                color: {
+                    border: '#2B7CE9',
+                    background: '#97C2FC',
+                }
+            },
+            edges: {
+                width: 2,
+                arrows: {
+                    to: { enabled: true, scaleFactor: 1 }
+                },
+                font: {
+                    size: 12,
+                    align: 'middle'
+                }
+            },
+            physics: {
+                enabled: true
+            }
+        };
+        
+        network = new vis.Network(container, data, options);
+        
+        // Handle edge click to show details
+        network.on("click", function(params) {
+            if (params.edges.length > 0) {
+                const edgeId = params.edges[0];
+                const edge = edges.get(edgeId);
+                if (edge) {
+                    const detailsDiv = document.getElementById('edgeDetails');
+                    if (detailsDiv) {
+                        detailsDiv.innerHTML = `
+                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                <h3 class="font-semibold text-gray-900 mb-2">${edge.from} → ${edge.to}</h3>
+                                <p class="text-sm text-gray-700">Type: ${edge.label || 'relationship'}</p>
+                                ${edge.description ? `<p class="text-sm text-gray-600 mt-2">${edge.description}</p>` : ''}
+                            </div>
+                        `;
+                    }
+                }
+            }
+        });
+        
+        // Load real data from API
+        loadGraphData();
+        
+        console.log('Network graph initialized');
+    });
+    
+    // Load graph data from API
+    async function loadGraphData() {
+        try {
+            const response = await fetch('/api/v1/graph');
+            if (!response.ok) {
+                throw new Error('Failed to load graph data');
+            }
+            
+            const data = await response.json();
+            
+            // Convert API data to vis.js format
+            const nodeArray = data.nodes.map(node => ({
+                id: node.id,
+                label: node.label,
+                color: '#4A90E2'
+            }));
+            
+            const edgeArray = data.links.map(link => {
+                let color = '#888888'; // default gray for references
+                if (link.type === 'contradicts') {
+                    color = '#FF4444'; // red for contradictions
+                }
+                
+                return {
+                    id: `${link.source}-${link.target}-${link.type}`,
+                    from: link.source,
+                    to: link.target,
+                    label: link.type || 'relationship',
+                    color: { color: color },
+                    description: link.description || ''
+                };
+            });
+            
+            nodes.clear();
+            edges.clear();
+            nodes.add(nodeArray);
+            edges.add(edgeArray);
+            
+            console.log(`Graph loaded ${nodeArray.length} nodes and ${edgeArray.length} edges`);
+        } catch (error) {
+            console.error('Error loading graph data:', error);
+            // Fallback to dummy data if API fails
+            const dummyNodes = new vis.DataSet([
+                { id: 1, label: 'Document A', color: '#4A90E2' },
+                { id: 2, label: 'Document B', color: '#4A90E2' },
+                { id: 3, label: 'Document C', color: '#4A90E2' }
+            ]);
+            
+            const dummyEdges = new vis.DataSet([
+                { from: 1, to: 2, label: 'References', color: { color: '#888888' } },
+                { from: 2, to: 3, label: 'Contradicts', color: { color: '#FF4444' } }
+            ]);
+            
+            nodes.clear();
+            edges.clear();
+            nodes.add(dummyNodes);
+            edges.add(dummyEdges);
+            console.log('Using dummy graph data due to API error');
+        }
+    }
+    
+    // Load evaluation status
+    async function loadEvaluationStatus() {
+        try {
+            const response = await fetch('/api/v1/stats');
+            const stats = await response.json();
+            const days = stats.trial_days || 0;
+            const evalStatusEl = document.getElementById('evaluationStatus');
+            if (evalStatusEl) {
+                if (days > 365) {
+                    evalStatusEl.textContent = `Evaluation Mode: Day ${days} of 365 (Expired - License Required)`;
+                    evalStatusEl.className = 'text-center text-sm text-red-600 font-semibold';
+                } else {
+                    evalStatusEl.textContent = `Evaluation Mode: Day ${days} of 365`;
+                    evalStatusEl.className = 'text-center text-sm text-orange-600 font-semibold';
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load evaluation status:', error);
+        }
+    }
+    
+    loadEvaluationStatus();
+</script>
+{{ end }}

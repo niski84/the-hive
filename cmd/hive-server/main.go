@@ -5,16 +5,15 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,12 +24,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/the-hive/internal/config"
+	"github.com/the-hive/internal/database"
 	"github.com/the-hive/internal/embeddings"
 	"github.com/the-hive/internal/jobs"
 	"github.com/the-hive/internal/logger"
 	"github.com/the-hive/internal/proto"
 	"github.com/the-hive/internal/queue"
+	"github.com/the-hive/internal/rules"
 	"github.com/the-hive/internal/server"
+	"github.com/the-hive/internal/server/middleware"
 	"github.com/the-hive/internal/vectordb"
 	"github.com/the-hive/internal/worker"
 )
@@ -39,7 +41,7 @@ var (
 	grpcPort    = flag.Int("grpc-port", 50051, "gRPC server port")
 	httpPort    = flag.Int("http-port", 8081, "HTTP server port")
 	dbPath      = flag.String("db-path", "./hive.db", "SQLite database path")
-	templateDir = flag.String("template-dir", "./frontend/template", "Template directory")
+	templateDir = flag.String("template-dir", "./internal/server/templates", "Template directory")
 	staticDir   = flag.String("static-dir", "./frontend/static", "Static assets directory")
 	workerCount = flag.Int("worker-count", 5, "Number of background workers")
 )
@@ -53,11 +55,68 @@ func main() {
 		logger.Printf("Logger initialized, writing to %s", logFile)
 	}
 
+	// DEBUG: Check if OPENAI_API_KEY exists BEFORE loading .env
+	apiKeyBeforeLoad := os.Getenv("OPENAI_API_KEY")
+	logger.Printf("[DEBUG] OPENAI_API_KEY before .env load: present=%v, length=%d", apiKeyBeforeLoad != "", len(apiKeyBeforeLoad))
+	if apiKeyBeforeLoad != "" {
+		preview := apiKeyBeforeLoad
+		if len(preview) > 5 {
+			preview = preview[:5]
+		}
+		logger.Printf("[DEBUG] Key Value (First 5 chars) before load: %s", preview)
+	}
+
 	// Load .env file if it exists (ignore error if file doesn't exist)
+	envFileExists := false
+	if _, err := os.Stat(".env"); err == nil {
+		envFileExists = true
+	}
+	logger.Printf("[DEBUG] .env file found: %v", envFileExists)
+
 	if err := godotenv.Load(); err != nil {
 		logger.Printf("No .env file found, using environment variables: %v", err)
 	} else {
 		logger.Printf("Loaded .env file")
+	}
+
+	// DEBUG: Check API key source after loading .env
+	apiKeyAfterLoad := os.Getenv("OPENAI_API_KEY")
+	logger.Printf("[DEBUG] OPENAI_API_KEY present in environment: %v", apiKeyAfterLoad != "")
+	logger.Printf("[DEBUG] OPENAI_API_KEY length: %d", len(apiKeyAfterLoad))
+	
+	if apiKeyAfterLoad != "" {
+		preview := apiKeyAfterLoad
+		if len(preview) > 5 {
+			preview = preview[:5]
+		}
+		logger.Printf("[DEBUG] Key Value (First 5 chars): %s", preview)
+		
+		// Determine source
+		if apiKeyBeforeLoad == "" && apiKeyAfterLoad != "" {
+			logger.Printf("[DEBUG] Key source: .env file (was not in environment before)")
+		} else if apiKeyBeforeLoad != "" && apiKeyBeforeLoad == apiKeyAfterLoad {
+			logger.Printf("[DEBUG] Key source: Environment variable (unchanged by .env)")
+		} else if apiKeyBeforeLoad != "" && apiKeyBeforeLoad != apiKeyAfterLoad {
+			logger.Printf("[DEBUG] Key source: .env file (overrode environment variable)")
+		}
+	} else {
+		logger.Printf("[DEBUG] Key source: Not found (neither in environment nor .env)")
+	}
+
+	// Check and set INSTALL_DATE if missing
+	installDate := os.Getenv("INSTALL_DATE")
+	if installDate == "" {
+		// Set install date to today
+		today := time.Now().Format("2006-01-02")
+		os.Setenv("INSTALL_DATE", today)
+		// Write to .env file if it exists
+		if err := writeEnvVar("INSTALL_DATE", today); err != nil {
+			logger.Printf("Warning: Failed to write INSTALL_DATE to .env: %v", err)
+		} else {
+			logger.Printf("Set INSTALL_DATE to %s", today)
+		}
+	} else {
+		logger.Printf("INSTALL_DATE is set to: %s", installDate)
 	}
 
 	// Verify environment variables are loaded
@@ -77,9 +136,64 @@ func main() {
 	}
 	defer db.Close()
 
+	// Enable WAL mode for concurrent read/write access
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		logger.Fatalf("failed to enable WAL mode: %v", err)
+	}
+	logger.Printf("SQLite WAL mode enabled")
+
+	// Set busy timeout to prevent indefinite hanging (10 seconds)
+	if _, err := db.Exec("PRAGMA busy_timeout=10000"); err != nil {
+		logger.Fatalf("failed to set busy timeout: %v", err)
+	}
+	logger.Printf("SQLite busy timeout set to 10000ms")
+	logger.Printf("SQLite busy timeout set to 5000ms")
+
 	if err := initDatabase(db); err != nil {
 		logger.Fatalf("failed to initialize schema: %v", err)
 	}
+
+	// Initialize event logger
+	eventLogger, err := database.NewEventLogger(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize event logger: %v", err)
+	}
+
+	// Initialize graph store
+	graphStore, err := database.NewGraphStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize graph store: %v", err)
+	}
+
+	// Initialize API key store
+	apiKeyStore, err := database.NewAPIKeyStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize API key store: %v", err)
+	}
+
+	// Initialize audit log store
+	auditLogStore, err := database.NewAuditLogStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize audit log store: %v", err)
+	}
+
+	// Initialize rules store
+	ruleStore, err := rules.NewStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize rules store: %v", err)
+	}
+
+	// Initialize system metadata store (for install_date, license_key, etc.)
+	metadataStore, err := database.NewSystemMetadataStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize system metadata store: %v", err)
+	}
+	
+	// Ensure install_date is set in the database
+	if err := metadataStore.EnsureInstallDate(); err != nil {
+		logger.Fatalf("failed to ensure install_date: %v", err)
+	}
+	logger.Printf("System metadata initialized")
 
 	// Connect to Qdrant via gRPC (optional - will use mock if unavailable)
 	var vectorDB vectordb.VectorDB
@@ -156,8 +270,23 @@ func main() {
 		}()
 	}
 
+	// Initialize WebSocket manager (before hiveService so we can pass it)
+	wsManager := server.NewWebSocketManager(redisClient)
+
+	// Initialize analyst worker pool
+	notificationAdapterImpl := &notificationAdapter{wm: wsManager}
+	analystPool := worker.NewAnalystPool(ruleStore, notificationAdapterImpl, graphStore, vectorDB, embedder, 3)
+	analystPool.Start()
+	defer analystPool.Stop()
+
+	// Initialize tagging worker pool
+	taggerPool := worker.NewTaggerPool(2) // 2 workers for tagging
+	taggerPool.Start()
+	defer taggerPool.Stop()
+
 	grpcServer := grpc.NewServer()
 	hiveService := server.NewHiveService(db, vectorDB, embedder)
+	hiveService.SetWebSocketManager(wsManager)
 	proto.RegisterHiveServer(grpcServer, hiveService)
 
 	grpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", *grpcPort))
@@ -174,7 +303,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *httpPort),
-		Handler: routes(db, vectorDB, embedder, jobQueue, *templateDir, *staticDir),
+		Handler: routes(db, vectorDB, embedder, jobQueue, wsManager, analystPool, taggerPool, ruleStore, eventLogger, graphStore, apiKeyStore, auditLogStore, metadataStore, *templateDir, *staticDir),
 	}
 
 	go func() {
@@ -216,6 +345,36 @@ func initEmbedder() embeddings.Embedder {
 	return embedder
 }
 
+// writeEnvVar writes a key-value pair to the .env file
+func writeEnvVar(key, value string) error {
+	envPath := ".env"
+
+	// Read existing .env file
+	content, err := os.ReadFile(envPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Check if key already exists
+	lines := strings.Split(string(content), "\n")
+	keyFound := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			lines[i] = key + "=" + value
+			keyFound = true
+			break
+		}
+	}
+
+	// Append if not found
+	if !keyFound {
+		lines = append(lines, key+"="+value)
+	}
+
+	// Write back to file
+	return os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
 func initDatabase(db *sql.DB) error {
 	const schema = `
 	CREATE TABLE IF NOT EXISTS documents (
@@ -240,49 +399,37 @@ func initDatabase(db *sql.DB) error {
 	return err
 }
 
-func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder, jobQueue queue.Queue, templateDir, staticDir string) http.Handler {
+func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder, jobQueue queue.Queue, wsManager *server.WebSocketManager, analystPool *worker.AnalystPool, taggerPool *worker.TaggerPool, ruleStore *rules.Store, eventLogger *database.EventLogger, graphStore *database.GraphStore, apiKeyStore *database.APIKeyStore, auditLogStore *database.AuditLogStore, metadataStore *database.SystemMetadataStore, templateDir, staticDir string) http.Handler {
 	_ = db
 	_ = vectorDB
 	mux := http.NewServeMux()
+	
+	// Apply traffic logger middleware to all routes
+	trafficLogger := middleware.TrafficLogger
 
 	staticPath, _ := filepath.Abs(staticDir)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticPath))))
 
-	// Helper function to render templates
-	renderTemplate := func(w http.ResponseWriter, tmplName string, data interface{}) {
-		basePath := filepath.Join(templateDir, "base.html")
-		tmplPath := filepath.Join(templateDir, tmplName)
-
-		tmpl, err := template.ParseFiles(basePath, tmplPath)
-		if err != nil {
-			log.Printf("failed to parse template %s: %v", tmplName, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.ExecuteTemplate(w, "base.html", data); err != nil {
-			log.Printf("failed to execute template %s: %v", tmplName, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-	}
+	// Create middleware
+	authMiddleware := server.AuthMiddleware(apiKeyStore)
+	// Use new licensing middleware from middleware package
+	licensingMiddleware := middleware.LicenseMiddleware(metadataStore)
 
 	// Create handlers with dependencies
-	ingestHandler := server.NewIngestHandler(vectorDB)
-	searchHandler := server.NewSearchHandler(vectorDB, embedder)
+	ingestHandler := server.NewIngestHandler(vectorDB, wsManager, analystPool, taggerPool, eventLogger, auditLogStore)
+	searchHandler := server.NewSearchHandler(vectorDB, embedder, auditLogStore)
 
-	// Web interface handlers
+	// Web interface handlers (public)
 	mux.HandleFunc("/", server.HandleWeb)
 	mux.HandleFunc("/settings", server.HandleSettings)
+	mux.HandleFunc("/timeline", server.HandleTimelinePage)
+	mux.HandleFunc("/graph", server.HandleGraphPage)
 
-	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
-		renderTemplate(w, "search.html", nil)
-	})
-
-	// API endpoints
-	mux.HandleFunc("/api/v1/ingest", ingestHandler.HandleIngest)
-	mux.HandleFunc("/api/v1/search", searchHandler.HandleSearch)
+	// Protected API endpoints
+	// Ingest requires client API key authentication
+	mux.Handle("/api/v1/ingest", licensingMiddleware(authMiddleware(http.HandlerFunc(ingestHandler.HandleIngest))))
+	// Search requires licensing check only (no API key for web UI)
+	mux.Handle("/api/v1/search", licensingMiddleware(http.HandlerFunc(searchHandler.HandleSearch)))
 
 	// Configuration endpoints
 	mux.HandleFunc("/api/v1/config", func(w http.ResponseWriter, r *http.Request) {
@@ -301,148 +448,72 @@ func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder
 		server.HandleStats(w, r, vectorDB, db)
 	})
 
+	// WebSocket endpoint (protected - auth happens in HandleWebSocket)
+	// Note: WebSocket auth is handled via query parameter or header
+	mux.Handle("/api/v1/ws", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wsManager.HandleWebSocket(w, r)
+	})))
+
+	// Rules API endpoints
+	mux.HandleFunc("/api/v1/rules", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetRules(w, r, ruleStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleAddRule(w, r, ruleStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/rules/add", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleAddRule(w, r, ruleStore)
+	})
+	mux.HandleFunc("/api/v1/rules/update", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleUpdateRule(w, r, ruleStore)
+	})
+	mux.HandleFunc("/api/v1/rules/delete", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleDeleteRule(w, r, ruleStore)
+	})
+
+	// Health endpoint (public - no auth required, but tracks API keys if provided)
+	server.SetHealthAPIKeyStore(apiKeyStore)
+	mux.HandleFunc("/api/v1/health", server.HandleHealth)
+
+	// API Key management endpoints (admin only - no auth required for now, can add admin auth later)
+	mux.HandleFunc("/api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleListAPIKeys(w, r, apiKeyStore)
+	})
+	mux.HandleFunc("/api/v1/keys/generate", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGenerateAPIKey(w, r, apiKeyStore)
+	})
+	mux.HandleFunc("/api/v1/keys/revoke", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleRevokeAPIKey(w, r, apiKeyStore)
+	})
+
+	// Timeline API endpoint
+	mux.HandleFunc("/api/v1/timeline", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleTimeline(w, r, eventLogger)
+	})
+
+	// Graph API endpoint (returns JSON data)
+	mux.HandleFunc("/api/v1/graph", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGraph(w, r, graphStore)
+	})
+
+	// Audit log API endpoint
+	mux.HandleFunc("/api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleAuditLogs(w, r, auditLogStore)
+	})
+
 	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte(`{"error":"method not allowed"}`))
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
-		query := r.FormValue("query")
-		if query == "" {
-			// Try JSON body
-			var req struct {
-				Query string `json:"query"`
-				TopK  int    `json:"top_k"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-				query = req.Query
-			}
-		}
-
-		if query == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"query parameter is required"}`))
-			return
-		}
-
-		topK := 10
-		if topKStr := r.FormValue("top_k"); topKStr != "" {
-			fmt.Sscanf(topKStr, "%d", &topK)
-		}
-
-		ctx := r.Context()
-
-		// Generate query embedding
-		queryVector, err := embedder.EmbedText(ctx, query)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, `<div class="bg-yellow-50 p-4 rounded-lg text-yellow-700">Search is not available: failed to generate embedding. Please ensure Qdrant is running for full functionality.</div>`)
-			return
-		}
-
-		// Search in vector database
-		matches, err := vectorDB.Search(ctx, queryVector, topK)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, `<div class="bg-yellow-50 p-4 rounded-lg text-yellow-700">Search is not available: %v. Please ensure Qdrant is running for full functionality.</div>`, err)
-			return
-		}
-
-		// Fetch content from SQLite for each match
-		type searchMatch struct {
-			ChunkID    string
-			DocumentID string
-			Content    string
-			Score      float32
-			Metadata   map[string]string
-		}
-
-		results := make([]searchMatch, 0, len(matches))
-		for _, match := range matches {
-			var content string
-			if err := db.QueryRowContext(ctx, "SELECT content FROM chunks WHERE id = ?", match.ID).Scan(&content); err != nil {
-				// Skip matches without content
-				continue
-			}
-
-			results = append(results, searchMatch{
-				ChunkID:    match.ID,
-				DocumentID: match.DocumentID,
-				Content:    content,
-				Score:      match.Score,
-				Metadata:   match.Metadata,
-			})
-		}
-
-		// Render HTML template for HTMX
-		tmplPath := filepath.Join(templateDir, "search_results.html")
-		tmpl, err := template.ParseFiles(tmplPath)
-		if err != nil {
-			log.Printf("failed to parse search results template: %v", err)
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `<div class="bg-red-50 p-4 rounded-lg text-red-700">Error rendering results: %v</div>`, err)
-			return
-		}
-
-		data := map[string]interface{}{
-			"Matches": results,
-			"Count":   len(results),
-		}
-
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusOK)
-		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("failed to execute search results template: %v", err)
-			fmt.Fprintf(w, `<div class="bg-red-50 p-4 rounded-lg text-red-700">Error rendering results: %v</div>`, err)
-		}
+		searchHandler.HandleSearch(w, r)
 	})
 
-	// Job queue API endpoint
-	mux.HandleFunc("/api/jobs/recalc-priority", func(w http.ResponseWriter, r *http.Request) {
-		if jobQueue == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"error":"job queue not available"}`))
-			return
-		}
-
-		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte(`{"error":"method not allowed"}`))
-			return
-		}
-
-		// Parse request body
-		var payload jobs.RecalcIssuePriorityPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(fmt.Sprintf(`{"error":"invalid request: %v"}`, err)))
-			return
-		}
-
-		// Enqueue job
-		ctx := r.Context()
-		if err := jobs.EnqueueRecalcIssuePriority(ctx, jobQueue, payload); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(fmt.Sprintf(`{"error":"failed to enqueue job: %v"}`, err)))
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"status":"job enqueued"}`))
-	})
-
-	return mux
+	// Wrap all routes with traffic logger
+	return trafficLogger(mux)
 }
 
 func waitForShutdown(grpcServer *grpc.Server, httpServer *http.Server, workerCancel context.CancelFunc) {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 type Manager struct {
 	watchPaths       []string
 	serverAddr       string
+	clientID         string
 	eventBroadcaster *events.Broadcaster
 	watchers         map[string]*fsnotify.Watcher
 	droneClient      *client.DroneClient
@@ -48,7 +50,7 @@ type Status struct {
 }
 
 // NewManager creates a new watcher manager
-func NewManager(watchPaths []string, serverAddr string, broadcaster *events.Broadcaster, configDir string) (*Manager, error) {
+func NewManager(watchPaths []string, serverAddr string, grpcServerAddr string, clientID string, broadcaster *events.Broadcaster, configDir string) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize database
@@ -67,6 +69,7 @@ func NewManager(watchPaths []string, serverAddr string, broadcaster *events.Broa
 	mgr := &Manager{
 		watchPaths:       watchPaths,
 		serverAddr:       serverAddr,
+		clientID:         clientID,
 		eventBroadcaster: broadcaster,
 		watchers:         make(map[string]*fsnotify.Watcher),
 		chunker:          parser.NewChunker(),
@@ -77,19 +80,26 @@ func NewManager(watchPaths []string, serverAddr string, broadcaster *events.Broa
 		cancel:           cancel,
 	}
 
-	// Only connect to Hive server if address is provided
-	if serverAddr != "" {
-		conn, err := grpc.Dial(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Only connect to Hive server if gRPC address is provided
+	if grpcServerAddr != "" {
+		// Sanitize gRPC address: remove http:// or https:// if present
+		grpcAddr := strings.TrimPrefix(grpcServerAddr, "http://")
+		grpcAddr = strings.TrimPrefix(grpcAddr, "https://")
+		grpcAddr = strings.TrimSpace(grpcAddr)
+
+		log.Printf("Connecting to Hive server gRPC endpoint: %s", grpcAddr)
+		conn, err := grpc.Dial(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			cancel()
-			clientDB.Close()
-			return nil, fmt.Errorf("failed to connect to Hive server: %w", err)
+			// Don't close clientDB here - let main() handle it via watcherMgr.Stop()
+			return nil, fmt.Errorf("failed to connect to Hive server gRPC: %w", err)
 		}
 
 		hiveClient := proto.NewHiveClient(conn)
 		mgr.droneClient = client.NewDroneClient(hiveClient)
+		log.Printf("Successfully connected to Hive server gRPC endpoint")
 	} else {
-		log.Printf("Warning: No Hive server address configured. File watching will work but ingestion is disabled.")
+		log.Printf("Warning: No Hive server gRPC address configured. File watching will work but ingestion is disabled.")
 	}
 
 	return mgr, nil
@@ -388,13 +398,15 @@ func (m *Manager) processFile(filePath string) {
 	successCount := 0
 	serverStatus := "success"
 
-	// Prepare metadata with file hash and ingest type
+	// Prepare metadata with file hash, ingest type, and client_id
 	metadata := map[string]string{
 		"filename":    filepath.Base(filePath),
 		"path":        filePath,
+		"file_path":   filePath, // Ensure file_path is set for UUID generation
 		"filetype":    fileType,
 		"file_hash":   decision.FileHash,
 		"ingest_type": string(decision.IngestType),
+		"client_id":   m.clientID,
 	}
 
 	for i, chunk := range chunks {

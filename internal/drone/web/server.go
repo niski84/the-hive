@@ -10,29 +10,50 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/the-hive/internal/drone"
 	"github.com/the-hive/internal/drone/events"
 	"github.com/the-hive/internal/drone/watcher"
 )
 
+var (
+	serverStatus     string = "unknown"
+	serverStatusLock sync.RWMutex
+)
+
+// UpdateServerStatus updates the server status for UI display
+func UpdateServerStatus(status string) {
+	serverStatusLock.Lock()
+	defer serverStatusLock.Unlock()
+	serverStatus = status
+}
+
+// GetServerStatus returns the current server status
+func GetServerStatus() string {
+	serverStatusLock.RLock()
+	defer serverStatusLock.RUnlock()
+	return serverStatus
+}
+
 // Server handles the web UI and API
 type Server struct {
-	config          *drone.Config
-	watcherMgr      *watcher.Manager
+	config           *drone.Config
+	watcherMgr       *watcher.Manager
 	eventBroadcaster *events.Broadcaster
-	uiFiles         embed.FS
-	mu              sync.RWMutex
+	uiFiles          embed.FS
+	mu               sync.RWMutex
 }
 
 // NewServer creates a new web server instance
 func NewServer(config *drone.Config, watcherMgr *watcher.Manager, broadcaster *events.Broadcaster, uiFiles embed.FS) *Server {
 	return &Server{
-		config:          config,
-		watcherMgr:      watcherMgr,
+		config:           config,
+		watcherMgr:       watcherMgr,
 		eventBroadcaster: broadcaster,
-		uiFiles:         uiFiles,
+		uiFiles:          uiFiles,
 	}
 }
 
@@ -52,10 +73,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/config/save", s.handleSaveConfig)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/server-status", s.handleServerStatus)
 	mux.HandleFunc("/api/stream", s.handleStream)
 	mux.HandleFunc("/api/watch-paths", s.handleWatchPaths)
 	mux.HandleFunc("/api/watch-paths/add", s.handleAddWatchPath)
 	mux.HandleFunc("/api/watch-paths/remove", s.handleRemoveWatchPath)
+	mux.HandleFunc("/api/v1/shutdown", s.handleShutdown)
 
 	return mux
 }
@@ -74,11 +97,15 @@ func (s *Server) serveUI(mux *http.ServeMux) {
 
 	// Serve index.html for root
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		if r.URL.Path != "/" && r.URL.Path != "/settings" {
 			http.NotFound(w, r)
 			return
 		}
-		s.serveIndex(w, r)
+		if r.URL.Path == "/settings" {
+			s.serveSettings(w, r)
+		} else {
+			s.serveIndex(w, r)
+		}
 	})
 }
 
@@ -92,6 +119,27 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 
 	// Parse and execute template
 	tmpl, err := template.New("index").Parse(string(indexHTML))
+	if err != nil {
+		http.Error(w, "Failed to parse template", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, nil); err != nil {
+		log.Printf("Template execution error: %v", err)
+	}
+}
+
+// serveSettings serves the settings page
+func (s *Server) serveSettings(w http.ResponseWriter, r *http.Request) {
+	settingsHTML, err := s.uiFiles.ReadFile("ui/settings.html")
+	if err != nil {
+		http.Error(w, "Failed to load settings page", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse and execute template
+	tmpl, err := template.New("settings").Parse(string(settingsHTML))
 	if err != nil {
 		http.Error(w, "Failed to parse template", http.StatusInternalServerError)
 		return
@@ -136,6 +184,12 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if newConfig.Server.Address != "" {
 		s.config.Server.Address = newConfig.Server.Address
 	}
+	if newConfig.GrpcServerAddress != "" {
+		s.config.GrpcServerAddress = newConfig.GrpcServerAddress
+	}
+	if newConfig.APIKey != "" {
+		s.config.APIKey = newConfig.APIKey
+	}
 	if len(newConfig.WatchPaths) > 0 {
 		s.config.WatchPaths = newConfig.WatchPaths
 	}
@@ -177,6 +231,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
+}
+
+// handleServerStatus returns the Hive server connection status
+func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	serverAddr := s.config.Server.Address
+	s.mu.RUnlock()
+
+	// Check if server URL is empty
+	if serverAddr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "config_required"})
+		return
+	}
+
+	status := GetServerStatus()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 // handleStream handles Server-Sent Events
@@ -316,3 +393,29 @@ func (s *Server) handleRemoveWatchPath(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleShutdown handles POST /api/v1/shutdown requests
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	log.Printf("Shutting down request received...")
+
+	// Send response before shutting down
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "shutting down"})
+
+	// Flush the response
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	// Wait 1 second then exit
+	go func() {
+		time.Sleep(1 * time.Second)
+		log.Printf("Client shutdown complete")
+		os.Exit(0)
+	}()
+}

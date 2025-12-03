@@ -1,0 +1,276 @@
+<!--
+Copyright (c) 2025 Northbound System
+Author: Nicholas Skitch
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - The Hive Drone Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Header -->
+        <div class="mb-6">
+            <div class="flex items-center justify-between">
+                <h1 class="text-3xl font-bold text-gray-900">⚙️ Client Settings</h1>
+                <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">← Back to Dashboard</a>
+            </div>
+        </div>
+
+        <!-- Settings Form -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-xl font-semibold mb-4">Configuration</h2>
+            <p class="text-sm text-gray-600 mb-6">Configure your Drone Client connection settings.</p>
+            
+            <form id="settingsForm" class="space-y-6">
+                <!-- Hive Server URL (HTTP) -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Hive Server URL (HTTP)</label>
+                    <input 
+                        type="text" 
+                        id="serverURL" 
+                        name="server_url"
+                        placeholder="http://localhost:8081"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <p class="text-xs text-gray-500 mt-1">The HTTP address of your Hive server for WebSocket/health checks (default: http://localhost:8081)</p>
+                </div>
+
+                <!-- gRPC Server Address -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">gRPC Server Address</label>
+                    <input 
+                        type="text" 
+                        id="grpcServerAddress" 
+                        name="grpc_server_address"
+                        placeholder="localhost:50051"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <p class="text-xs text-gray-500 mt-1">The gRPC address of your Hive server for file ingestion (default: localhost:50051)</p>
+                </div>
+
+                <!-- API Key -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                    <div class="flex gap-2">
+                        <input 
+                            type="password" 
+                            id="apiKey" 
+                            name="api_key"
+                            placeholder="Enter your API key..."
+                            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        />
+                        <button 
+                            type="button"
+                            onclick="toggleApiKey()"
+                            class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                        >
+                            <span id="toggleText">Show</span>
+                        </button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Get your API key from the Hive Server Settings page</p>
+                </div>
+
+                <!-- Watch Paths -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Watch Paths</label>
+                    <textarea 
+                        id="watchPaths" 
+                        name="watch_paths"
+                        rows="6"
+                        placeholder="/path/to/watch&#10;/another/path"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
+                    ></textarea>
+                    <p class="text-xs text-gray-500 mt-1">Enter one directory path per line. The client will watch these directories for new files.</p>
+                </div>
+
+                <div id="saveStatus" class="text-sm"></div>
+
+                <div class="flex gap-4">
+                    <button 
+                        type="submit"
+                        class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+                    >
+                        💾 Save & Restart Watcher
+                    </button>
+                    <button 
+                        type="button"
+                        onclick="loadConfig()"
+                        class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg font-semibold hover:bg-gray-300 transition-colors"
+                    >
+                        🔄 Reload
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Info Box -->
+        <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <h3 class="text-sm font-semibold text-blue-900 mb-2">ℹ️ Configuration Notes</h3>
+            <ul class="text-sm text-blue-800 space-y-1 list-disc list-inside">
+                <li>Changes to Server URL and API Key require restarting the client to take effect</li>
+                <li>Watch paths are updated immediately without restart</li>
+                <li>Configuration is saved to <code class="bg-blue-100 px-1 rounded">~/.the-hive/config.yaml</code></li>
+            </ul>
+        </div>
+
+        <!-- Shutdown Button -->
+        <div class="mt-6 bg-red-50 border border-red-200 rounded-lg p-4">
+            <h3 class="text-sm font-semibold text-red-900 mb-2">⚠️ Client Control</h3>
+            <p class="text-sm text-red-800 mb-3">Shut down the Drone Client service.</p>
+            <button 
+                onclick="shutdownClient()"
+                class="px-4 py-2 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-colors"
+            >
+                🔴 Shutdown Client
+            </button>
+            <div id="shutdownStatus" class="mt-2 text-sm"></div>
+        </div>
+    </div>
+
+    <script>
+        let apiKeyVisible = false;
+
+        // Load current configuration
+        async function loadConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const config = await response.json();
+                
+                // Set server URL
+                const serverAddr = config.Server?.Address || config.server?.address || '';
+                document.getElementById('serverURL').value = serverAddr || 'http://localhost:8081';
+                
+                // Set gRPC server address
+                const grpcAddr = config.GrpcServerAddress || config.grpc_server_address || '';
+                document.getElementById('grpcServerAddress').value = grpcAddr || 'localhost:50051';
+                
+                // Set API key
+                document.getElementById('apiKey').value = config.APIKey || config.api_key || '';
+                
+                // Set watch paths
+                const paths = config.WatchPaths || config.watch_paths || [];
+                document.getElementById('watchPaths').value = paths.join('\n');
+            } catch (error) {
+                console.error('Failed to load config:', error);
+                document.getElementById('saveStatus').innerHTML = '<div class="text-red-600">Failed to load configuration</div>';
+            }
+        }
+
+        // Toggle API key visibility
+        function toggleApiKey() {
+            const input = document.getElementById('apiKey');
+            const toggleText = document.getElementById('toggleText');
+            apiKeyVisible = !apiKeyVisible;
+            
+            if (apiKeyVisible) {
+                input.type = 'text';
+                toggleText.textContent = 'Hide';
+            } else {
+                input.type = 'password';
+                toggleText.textContent = 'Show';
+            }
+        }
+
+        // Save configuration
+        document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const serverURL = document.getElementById('serverURL').value.trim();
+            const grpcServerAddress = document.getElementById('grpcServerAddress').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const watchPathsText = document.getElementById('watchPaths').value.trim();
+            
+            // Parse watch paths (split by newline, filter empty)
+            const watchPaths = watchPathsText
+                .split('\n')
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+            
+            const configData = {
+                Server: {
+                    Address: serverURL || 'http://localhost:8081'
+                },
+                GrpcServerAddress: grpcServerAddress || 'localhost:50051',
+                APIKey: apiKey,
+                WatchPaths: watchPaths
+            };
+
+            const statusDiv = document.getElementById('saveStatus');
+            statusDiv.innerHTML = '<div class="text-blue-600">Saving configuration...</div>';
+
+            try {
+                const response = await fetch('/api/config/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(configData),
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    statusDiv.innerHTML = '<div class="text-green-600">✓ Configuration saved successfully! The watcher has been reloaded.</div>';
+                    
+                    // Clear status after 3 seconds
+                    setTimeout(() => {
+                        statusDiv.innerHTML = '';
+                    }, 3000);
+                } else {
+                    statusDiv.innerHTML = `<div class="text-red-600">✗ Error: ${result.error || 'Failed to save configuration'}</div>`;
+                }
+            } catch (error) {
+                console.error('Failed to save config:', error);
+                statusDiv.innerHTML = '<div class="text-red-600">✗ Failed to save configuration. Check console for details.</div>';
+            }
+        });
+
+        // Shutdown client
+        async function shutdownClient() {
+            if (!confirm('Are you sure you want to shutdown the Drone Client? This will stop the service.')) {
+                return;
+            }
+            
+            const statusDiv = document.getElementById('shutdownStatus');
+            statusDiv.innerHTML = '<div class="text-blue-600">Shutting down client...</div>';
+            
+            try {
+                const response = await fetch('/api/v1/shutdown', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+                
+                if (response.ok) {
+                    statusDiv.innerHTML = '<div class="text-red-600 font-semibold">Client is shutting down...</div>';
+                    // Show final message
+                    setTimeout(() => {
+                        document.body.innerHTML = `
+                            <div class="min-h-screen bg-gray-50 flex items-center justify-center">
+                                <div class="text-center">
+                                    <h1 class="text-3xl font-bold text-gray-900 mb-4">🔴 Client is Down</h1>
+                                    <p class="text-gray-600">The Drone Client has been shut down.</p>
+                                </div>
+                            </div>
+                        `;
+                    }, 1500);
+                } else {
+                    statusDiv.innerHTML = '<div class="text-red-600">Failed to shutdown client</div>';
+                }
+            } catch (error) {
+                console.error('Failed to shutdown client:', error);
+                statusDiv.innerHTML = '<div class="text-red-600">Error: ' + error.message + '</div>';
+            }
+        }
+
+        // Load config on page load
+        loadConfig();
+    </script>
+</body>
+</html>
+

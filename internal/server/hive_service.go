@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/the-hive/internal/embeddings"
 	"github.com/the-hive/internal/proto"
@@ -19,6 +20,7 @@ type HiveService struct {
 	db        *sql.DB
 	vectorDB  vectordb.VectorDB
 	embedder  embeddings.Embedder
+	wsManager *WebSocketManager
 }
 
 // NewHiveService wires database and vector storage dependencies.
@@ -28,6 +30,11 @@ func NewHiveService(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.
 		vectorDB: vectorDB,
 		embedder: embedder,
 	}
+}
+
+// SetWebSocketManager sets the WebSocket manager for notifications
+func (s *HiveService) SetWebSocketManager(wsManager *WebSocketManager) {
+	s.wsManager = wsManager
 }
 
 // Ingest persists chunk metadata and forwards the vector payload to the vector DB.
@@ -65,8 +72,40 @@ func (s *HiveService) Ingest(ctx context.Context, req *proto.Chunk) (*proto.Stat
 	// Store vector in Qdrant if we have one
 	if len(vector) > 0 {
 		if err := s.vectorDB.Upsert(ctx, req.Id, vector, req.Metadata); err != nil {
-			log.Printf("vector upsert failed for chunk %s: %v", req.Id, err)
+			log.Printf("[ERROR] Job failed: vector upsert failed for chunk (pointID: %s): %v", req.Id, err)
 			// Don't fail the request - metadata is already stored
+		}
+	}
+
+	// Notification Logic: Check for "CONFIDENTIAL" keyword (only on first chunk to avoid duplicates)
+	if s.wsManager != nil && req.Metadata != nil {
+		chunkIndex := 0
+		if idx, ok := req.Metadata["chunk_index"]; ok {
+			fmt.Sscanf(idx, "%d", &chunkIndex)
+		}
+
+		// Only check first chunk to avoid duplicate notifications
+		if chunkIndex == 0 {
+			contentUpper := strings.ToUpper(req.Content)
+			if strings.Contains(contentUpper, "CONFIDENTIAL") {
+				clientID := req.Metadata["client_id"]
+				if clientID != "" {
+					filename := req.Metadata["filename"]
+					if filename == "" {
+						filename = req.DocumentId
+					}
+
+					notification := NotificationMessage{
+						Type:    "ALERT",
+						Message: fmt.Sprintf("Sensitive document detected: %s", filename),
+						Level:   "critical",
+					}
+
+					if err := s.wsManager.SendNotification(clientID, notification); err != nil {
+						log.Printf("Failed to send notification to client %s: %v", clientID, err)
+					}
+				}
+			}
 		}
 	}
 

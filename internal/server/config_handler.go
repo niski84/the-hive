@@ -19,6 +19,7 @@ type ConfigRequest struct {
 	APIKey     string `json:"api_key"`
 	QdrantURL  string `json:"qdrant_url"`
 	RedisURL   string `json:"redis_url"`
+	LicenseKey string `json:"license_key"`
 }
 
 // ConfigResponse represents the current configuration
@@ -27,6 +28,7 @@ type ConfigResponse struct {
 	APIKey     string `json:"api_key"` // Masked
 	QdrantURL  string `json:"qdrant_url"`
 	RedisURL   string `json:"redis_url"`
+	LicenseKey string `json:"license_key"` // Masked
 }
 
 // HandleGetConfig returns the current configuration
@@ -41,6 +43,7 @@ func HandleGetConfig(w http.ResponseWriter, r *http.Request) {
 		APIKey:     maskAPIKey(os.Getenv("OPENAI_API_KEY")),
 		QdrantURL:  getEnvOrDefault("QDRANT_URL", "localhost:6334"),
 		RedisURL:   getEnvOrDefault("REDIS_URL", "localhost:6379"),
+		LicenseKey: maskAPIKey(os.Getenv("NORTHBOUND_LICENSE_KEY")),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -60,6 +63,39 @@ func HandleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate API key format if provided
+	if req.APIKey != "" {
+		// Trim whitespace
+		req.APIKey = strings.TrimSpace(req.APIKey)
+		
+		// Determine provider (use request provider or current env)
+		provider := req.AIProvider
+		if provider == "" {
+			provider = getEnvOrDefault("EMBEDDER_TYPE", "openai")
+		}
+		
+		// Validate based on provider
+		if provider == "openai" {
+			if !strings.HasPrefix(req.APIKey, "sk-") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "Invalid OpenAI Key format. OpenAI API keys must start with 'sk-'",
+				})
+				return
+			}
+		} else if provider == "gemini" {
+			if !strings.HasPrefix(req.APIKey, "AI") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "Invalid Gemini Key format. Gemini API keys must start with 'AI'",
+				})
+				return
+			}
+		}
+	}
+
 	// Update environment variables
 	if req.AIProvider != "" {
 		os.Setenv("EMBEDDER_TYPE", req.AIProvider)
@@ -73,10 +109,22 @@ func HandleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if req.RedisURL != "" {
 		os.Setenv("REDIS_URL", req.RedisURL)
 	}
+	if req.LicenseKey != "" {
+		os.Setenv("NORTHBOUND_LICENSE_KEY", req.LicenseKey)
+	}
 
-	// Write to .env file
+	// Write to .env file (truncate and write cleanly)
 	envContent := buildEnvContent(req)
-	if err := os.WriteFile(".env", []byte(envContent), 0644); err != nil {
+	// Truncate file by opening with O_TRUNC
+	file, err := os.OpenFile(".env", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Printf("Failed to open .env file for writing: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to save configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	
+	if _, err := file.WriteString(envContent); err != nil {
 		log.Printf("Failed to write .env file: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to save configuration: %v", err), http.StatusInternalServerError)
 		return
@@ -94,42 +142,43 @@ func HandleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// buildEnvContent builds the .env file content
+// buildEnvContent builds the .env file content by reading existing values and updating
 func buildEnvContent(req ConfigRequest) string {
-	var lines []string
-
-	if req.AIProvider != "" {
-		lines = append(lines, fmt.Sprintf("EMBEDDER_TYPE=%s", req.AIProvider))
-	}
-	if req.APIKey != "" {
-		lines = append(lines, fmt.Sprintf("OPENAI_API_KEY=%s", req.APIKey))
-	}
-	if req.QdrantURL != "" {
-		lines = append(lines, fmt.Sprintf("QDRANT_URL=%s", req.QdrantURL))
-	}
-	if req.RedisURL != "" {
-		lines = append(lines, fmt.Sprintf("REDIS_URL=%s", req.RedisURL))
-	}
-
-	// Preserve other existing env vars if .env exists
-	if existing, err := os.ReadFile(".env"); err == nil {
-		existingLines := strings.Split(string(existing), "\n")
-		for _, line := range existingLines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			// Skip lines we're updating
-			if strings.HasPrefix(line, "EMBEDDER_TYPE=") ||
-				strings.HasPrefix(line, "OPENAI_API_KEY=") ||
-				strings.HasPrefix(line, "QDRANT_URL=") ||
-				strings.HasPrefix(line, "REDIS_URL=") {
-				continue
-			}
-			lines = append(lines, line)
+	// Read existing .env file using godotenv
+	envMap := make(map[string]string)
+	if _, err := os.Stat(".env"); err == nil {
+		// File exists, read it
+		if existing, err := godotenv.Read(".env"); err == nil {
+			envMap = existing
 		}
 	}
 
+	// Update with new values (only if provided)
+	if req.AIProvider != "" {
+		envMap["EMBEDDER_TYPE"] = req.AIProvider
+	}
+	if req.APIKey != "" {
+		envMap["OPENAI_API_KEY"] = req.APIKey
+	}
+	if req.QdrantURL != "" {
+		envMap["QDRANT_URL"] = req.QdrantURL
+	}
+	if req.RedisURL != "" {
+		envMap["REDIS_URL"] = req.RedisURL
+	}
+
+	// Build clean .env content
+	var lines []string
+	for key, value := range envMap {
+		// Skip empty values
+		if value == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s=%s", key, value))
+	}
+
+	// Sort for consistency (optional, but makes file readable)
+	// For now, just return in map order (Go maps are random order)
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -142,14 +191,16 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return value
 }
 
-// maskAPIKey masks the API key for display (shows first 4 and last 4 chars)
+// maskAPIKey masks the API key for display (shows first 3 and last 4 chars)
 func maskAPIKey(key string) string {
 	if key == "" {
 		return ""
 	}
-	if len(key) <= 8 {
+	key = strings.TrimSpace(key) // Ensure no whitespace
+	if len(key) <= 7 {
 		return "****"
 	}
-	return key[:4] + "****" + key[len(key)-4:]
+	// Show first 3 and last 4 characters
+	return key[:3] + "****" + key[len(key)-4:]
 }
 

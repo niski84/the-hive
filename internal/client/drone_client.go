@@ -1,10 +1,9 @@
-// Copyright (c) 2025 Northbound System
-// Author: Nicholas Skitch
 package client
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,8 +24,24 @@ func NewDroneClient(client proto.HiveClient) *DroneClient {
 // IngestChunk sends a chunk to the Hive server.
 // metadata should include: file_hash, ingest_type (new/update), filename, path, filetype
 func (c *DroneClient) IngestChunk(ctx context.Context, documentID, content string, chunkIndex int, metadata map[string]string) error {
+	filename := metadata["filename"]
+	if filename == "" {
+		filename = documentID
+	}
+
+	log.Printf("[INFO] Uploading file to server: %s (chunk %d/%s)...", filename, chunkIndex, metadata["ingest_type"])
+
+	// Create a deterministic UUID based on the file path and chunk index
+	// This ensures if we re-ingest the same file, we update the existing vectors (Idempotency)
+	filePath := metadata["file_path"]
+	if filePath == "" {
+		filePath = documentID
+	}
+	seed := fmt.Sprintf("%s-%d", filePath, chunkIndex)
+	pointID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
+
 	chunk := &proto.Chunk{
-		Id:         fmt.Sprintf("%s-%d-%s", documentID, chunkIndex, uuid.New().String()),
+		Id:         pointID, // Pure UUID string - no concatenation
 		DocumentId: documentID,
 		Content:    content,
 		Vector:     nil, // embeddings computed server-side later

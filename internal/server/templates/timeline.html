@@ -1,0 +1,159 @@
+<!--
+Copyright (c) 2025 Northbound System
+Author: Nicholas Skitch
+-->
+{{ define "title" }}Timeline - The Hive{{ end }}
+
+{{ define "head" }}
+<link href="https://unpkg.com/vis-timeline/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
+{{ end }}
+
+{{ define "content" }}
+<div class="max-w-6xl mx-auto">
+    <h1 class="text-3xl font-bold text-gray-900 mb-6">📅 Timeline</h1>
+    <p class="text-gray-600 mb-4">Visual processing history of all documents</p>
+    
+    <div id="visualization" class="bg-white rounded-lg shadow-md p-6" style="height: 600px;"></div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script src="https://unpkg.com/vis-timeline/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<script>
+    // Initialize timeline
+    let timeline = null;
+    let timelineData = null;
+    
+    document.addEventListener('DOMContentLoaded', function() {
+        const container = document.getElementById('visualization');
+        
+        // Create empty dataset
+        timelineData = new vis.DataSet([]);
+        
+        const options = {
+            zoomMin: 1000 * 60 * 60, // 1 hour
+            zoomMax: 1000 * 60 * 60 * 24 * 7, // 1 week
+            showCurrentTime: true,
+        };
+        
+        timeline = new vis.Timeline(container, timelineData, options);
+        
+        // Load real data from API
+        loadTimelineData();
+        
+        console.log('Timeline initialized');
+    });
+    
+    // Load timeline data from API
+    async function loadTimelineData() {
+        try {
+            const response = await fetch('/api/v1/timeline?limit=100');
+            if (!response.ok) {
+                throw new Error('Failed to load timeline data');
+            }
+            
+            const data = await response.json();
+            console.log('Timeline API response:', data);
+            
+            // Check if events array exists
+            if (!data.events || !Array.isArray(data.events)) {
+                console.error('Timeline API response missing events array:', data);
+                // Use empty array instead of throwing error
+                timelineData.clear();
+                console.log('Timeline cleared - no events available');
+                return;
+            }
+            
+            // Convert events to timeline items
+            const items = data.events.map((event, index) => {
+                // Validate event structure
+                if (!event.timestamp || !event.document_name) {
+                    console.warn('Invalid event structure:', event);
+                    return null;
+                }
+                
+                const start = new Date(event.timestamp);
+                if (isNaN(start.getTime())) {
+                    console.warn('Invalid timestamp:', event.timestamp);
+                    return null;
+                }
+                
+                const end = new Date(start.getTime() + 1000 * 60 * 5); // 5 minute duration
+                
+                // Determine color based on event type
+                let color = '#95a5a6'; // default gray
+                if (event.event_type === 'ingest') {
+                    color = '#10b981'; // green
+                } else if (event.event_type === 'update') {
+                    color = '#3b82f6'; // blue
+                } else if (event.event_type === 'alert') {
+                    color = '#ef4444'; // red
+                }
+                
+                return {
+                    id: event.id || index,
+                    content: `${(event.event_type || 'unknown').toUpperCase()}: ${event.document_name}`,
+                    start: start,
+                    end: end,
+                    type: 'range',
+                    style: `background-color: ${color}; border-color: ${color};`,
+                };
+            }).filter(item => item !== null); // Remove null items
+            
+            timelineData.clear();
+            timelineData.add(items);
+            
+            console.log(`Timeline loaded ${items.length} events`);
+        } catch (error) {
+            console.error('Error loading timeline data:', error);
+            // Fallback to dummy data if API fails
+            const dummyItems = new vis.DataSet([
+                {
+                    id: 1,
+                    content: 'Document A Ingested',
+                    start: new Date(2025, 0, 1, 10, 0, 0),
+                    type: 'point'
+                },
+                {
+                    id: 2,
+                    content: 'Document B Updated',
+                    start: new Date(2025, 0, 1, 10, 5, 0),
+                    type: 'point'
+                },
+                {
+                    id: 3,
+                    content: 'Document C Ingested',
+                    start: new Date(2025, 0, 1, 10, 10, 0),
+                    type: 'point'
+                }
+            ]);
+            timelineData.clear();
+            timelineData.add(dummyItems);
+            console.log('Using dummy timeline data due to API error');
+        }
+    }
+    
+    // Load evaluation status
+    async function loadEvaluationStatus() {
+        try {
+            const response = await fetch('/api/v1/stats');
+            const stats = await response.json();
+            const days = stats.trial_days || 0;
+            const evalStatusEl = document.getElementById('evaluationStatus');
+            if (evalStatusEl) {
+                if (days > 365) {
+                    evalStatusEl.textContent = `Evaluation Mode: Day ${days} of 365 (Expired - License Required)`;
+                    evalStatusEl.className = 'text-center text-sm text-red-600 font-semibold';
+                } else {
+                    evalStatusEl.textContent = `Evaluation Mode: Day ${days} of 365`;
+                    evalStatusEl.className = 'text-center text-sm text-orange-600 font-semibold';
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load evaluation status:', error);
+        }
+    }
+    
+    loadEvaluationStatus();
+</script>
+{{ end }}

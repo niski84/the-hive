@@ -33,3 +33,8 @@ func (m *MockVectorDB) Delete(ctx context.Context, id string) error {
 func (m *MockVectorDB) GetPointCount(ctx context.Context) (int, error) {
 	return 0, nil
 }
+
+// UpdatePayload is a no-op for mock
+func (m *MockVectorDB) UpdatePayload(ctx context.Context, id string, tags []string) error {
+	return nil
+}

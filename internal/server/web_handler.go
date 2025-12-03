@@ -12,24 +12,31 @@ import (
 //go:embed templates/*
 var templatesFS embed.FS
 
-// HandleWeb serves the main web interface
+// renderTemplate is a helper function to render templates with base layout
+func renderTemplate(w http.ResponseWriter, tmplName string, data interface{}) error {
+	// Parse both base.html and the requested template together
+	tmpl, err := template.ParseFS(templatesFS, "templates/base.html", "templates/"+tmplName)
+	if err != nil {
+		log.Printf("Failed to parse template %s: %v", tmplName, err)
+		return err
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, "base.html", data); err != nil {
+		log.Printf("Failed to execute template %s: %v", tmplName, err)
+		return err
+	}
+	return nil
+}
+
+// HandleWeb serves the main web interface (search page)
 func HandleWeb(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse template from embedded filesystem
-	tmpl, err := template.ParseFS(templatesFS, "templates/index.html")
-	if err != nil {
-		log.Printf("Failed to parse template: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, nil); err != nil {
-		log.Printf("Failed to execute template: %v", err)
+	if err := renderTemplate(w, "index.html", nil); err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -42,19 +49,36 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse template from embedded filesystem
-	tmpl, err := template.ParseFS(templatesFS, "templates/settings.html")
-	if err != nil {
-		log.Printf("Failed to parse settings template: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, nil); err != nil {
-		log.Printf("Failed to execute settings template: %v", err)
+	if err := renderTemplate(w, "settings.html", nil); err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 }
+
+// HandleTimelinePage serves the timeline visualization page
+func HandleTimelinePage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := renderTemplate(w, "timeline.html", nil); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleGraphPage serves the graph visualization page
+func HandleGraphPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := renderTemplate(w, "graph.html", nil); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
 

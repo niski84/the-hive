@@ -4,7 +4,6 @@ package server
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/the-hive/internal/logger"
@@ -30,26 +29,44 @@ func HandleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe to log channel
-	logChan := logger.GetDefault().Subscribe()
+	loggerInstance := logger.GetDefault()
+	if loggerInstance == nil {
+		logger.Errorf("[ERROR] Logger instance is nil in HandleLogStream")
+		http.Error(w, "Logger not initialized", http.StatusInternalServerError)
+		return
+	}
 
-	log.Printf("New log stream client connected")
+	// Create a per-client channel (like the client's broadcaster pattern)
+	clientChan, unsubscribeChan := loggerInstance.Subscribe()
+	if clientChan == nil {
+		logger.Warnf("[WARN] Log channel is nil - logger may be closed")
+		http.Error(w, "Log stream unavailable - logger may be closed", http.StatusInternalServerError)
+		return
+	}
+	
+	// Unsubscribe when client disconnects
+	defer loggerInstance.Unsubscribe(unsubscribeChan)
 
 	// Send initial connection message
 	fmt.Fprintf(w, "data: Connected to log stream\n\n")
 	flusher.Flush()
 
-	// Stream logs
+	// Stream logs from the client's channel
 	for {
 		select {
-		case logLine, ok := <-logChan:
+		case logLine, ok := <-clientChan:
 			if !ok {
-				// Channel closed
+				// Channel closed - send a final message and return
+				fmt.Fprintf(w, "data: Log stream closed\n\n")
+				flusher.Flush()
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", logLine)
+			// Write log line to SSE stream
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", logLine); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
-			log.Printf("Log stream client disconnected")
 			return
 		}
 	}

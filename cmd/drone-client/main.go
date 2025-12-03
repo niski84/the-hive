@@ -1,5 +1,3 @@
-// Copyright (c) 2025 Northbound System
-// Author: Nicholas Skitch
 package main
 
 import (
@@ -17,8 +15,10 @@ import (
 
 	"github.com/the-hive/internal/drone"
 	"github.com/the-hive/internal/drone/events"
+	"github.com/the-hive/internal/drone/heartbeat"
 	"github.com/the-hive/internal/drone/watcher"
 	"github.com/the-hive/internal/drone/web"
+	wsclient "github.com/the-hive/internal/drone/websocket"
 )
 
 //go:embed ui/*
@@ -54,6 +54,7 @@ func main() {
 	drone.ApplyCLIFlags(config, *serverAddr, watchDirList, *webPort)
 
 	log.Printf("Loaded configuration:")
+	log.Printf("  Client ID: %s", config.ClientID)
 	log.Printf("  Server: %s", config.Server.Address)
 	log.Printf("  Watch paths: %v", config.WatchPaths)
 	log.Printf("  Web server port: %d", config.WebServer.Port)
@@ -79,7 +80,7 @@ func main() {
 	}
 
 	// Initialize file watcher manager with database support
-	watcherMgr, err := watcher.NewManager(config.WatchPaths, config.Server.Address, eventBroadcaster, configDir)
+	watcherMgr, err := watcher.NewManager(config.WatchPaths, config.Server.Address, config.GrpcServerAddress, config.ClientID, eventBroadcaster, configDir)
 	if err != nil {
 		log.Fatalf("Failed to initialize watcher manager: %v", err)
 	}
@@ -88,7 +89,57 @@ func main() {
 	if err := watcherMgr.Start(ctx); err != nil {
 		log.Fatalf("Failed to start watcher: %v", err)
 	}
-	defer watcherMgr.Stop()
+	// Ensure database is closed at the end of main (after watcher stops)
+	defer func() {
+		watcherMgr.Stop() // This will close the database
+	}()
+
+	// Initialize WebSocket client if server address is configured
+	var wsClient *wsclient.Client
+	if config.Server.Address != "" {
+		// Convert gRPC address to HTTP address for WebSocket
+		serverURL := config.Server.Address
+		if !strings.Contains(serverURL, "://") {
+			// Assume it's a gRPC address, convert to HTTP
+			serverURL = "http://" + strings.Replace(serverURL, ":50051", ":8081", 1)
+		}
+
+		wsClient = wsclient.NewClient(serverURL, config.ClientID, config.APIKey, func(notification wsclient.NotificationMessage) {
+			log.Printf("🔔 [%s] %s: %s", notification.Level, notification.Type, notification.Message)
+			// Broadcast notification to UI via event broadcaster
+			eventBroadcaster.BroadcastJSON("notification", notification.Message, map[string]interface{}{
+				"type":  notification.Type,
+				"level": notification.Level,
+			})
+		})
+
+		// Connect WebSocket in background
+		go func() {
+			if err := wsClient.Connect(); err != nil {
+				log.Printf("Failed to connect WebSocket: %v (will retry)", err)
+			}
+		}()
+	}
+
+	// Initialize heartbeat monitor
+	var statusCallback func(string)
+	statusCallback = func(status string) {
+		web.UpdateServerStatus(status)
+	}
+
+	var heartbeatMonitor *heartbeat.Monitor
+	if config.Server.Address != "" {
+		// Convert gRPC address to HTTP address for health check
+		serverURL := config.Server.Address
+		if !strings.Contains(serverURL, "://") {
+			// Assume it's a gRPC address, convert to HTTP
+			serverURL = "http://" + strings.Replace(serverURL, ":50051", ":8081", 1)
+		}
+
+		heartbeatMonitor = heartbeat.NewMonitor(serverURL, config.APIKey, statusCallback)
+		heartbeatMonitor.Start()
+		defer heartbeatMonitor.Stop()
+	}
 
 	// Initialize web server
 	webServer := web.NewServer(config, watcherMgr, eventBroadcaster, uiFiles)
@@ -121,6 +172,11 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("Error shutting down web server: %v", err)
+	}
+
+	// Close WebSocket connection
+	if wsClient != nil {
+		wsClient.Close()
 	}
 
 	cancel()

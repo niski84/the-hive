@@ -13,11 +13,13 @@ import (
 
 // Logger wraps the standard log package with file output and broadcasting
 type Logger struct {
-	file     *os.File
-	logger   *log.Logger
-	broadcast chan string
-	mu       sync.RWMutex
-	closed   bool
+	file       *os.File
+	logger     *log.Logger
+	broadcast  chan string
+	subscribers map[chan string]bool
+	subMu      sync.RWMutex
+	mu         sync.RWMutex
+	closed     bool
 }
 
 var (
@@ -26,6 +28,7 @@ var (
 )
 
 // Init initializes the default logger
+// If already initialized, returns the existing logger (even if closed)
 func Init(logFile string) (*Logger, error) {
 	var err error
 	once.Do(func() {
@@ -45,32 +48,111 @@ func NewLogger(logFile string) (*Logger, error) {
 	multiWriter := io.MultiWriter(os.Stdout, file)
 
 	logger := &Logger{
-		file:      file,
-		logger:    log.New(multiWriter, "", log.LstdFlags|log.Lshortfile),
-		broadcast: make(chan string, 100), // Buffered channel to prevent blocking
-		closed:    false,
+		file:        file,
+		logger:      log.New(multiWriter, "", log.LstdFlags|log.Lshortfile),
+		broadcast:   make(chan string, 100), // Buffered channel to prevent blocking
+		subscribers: make(map[chan string]bool),
+		closed:      false,
 	}
+	
+	// Start broadcaster goroutine
+	go logger.broadcastLoop()
 
 	return logger, nil
 }
 
 // GetDefault returns the default logger instance
+// If the logger is closed, it creates a new fallback logger
 func GetDefault() *Logger {
 	if defaultLogger == nil {
 		// Fallback to stdout-only logger if not initialized
 		defaultLogger = &Logger{
-			logger:    log.New(os.Stdout, "", log.LstdFlags|log.Lshortfile),
-			broadcast: make(chan string, 100),
+			logger:      log.New(os.Stdout, "", log.LstdFlags|log.Lshortfile),
+			broadcast:   make(chan string, 100),
+			subscribers: make(map[chan string]bool),
+			closed:      false, // Explicitly set closed to false
 		}
+		go defaultLogger.broadcastLoop()
+		return defaultLogger
 	}
+	
+	// Check if the logger is closed
+	defaultLogger.mu.RLock()
+	closed := defaultLogger.closed
+	defaultLogger.mu.RUnlock()
+	
+	if closed {
+		// Logger was closed - create a new fallback logger
+		// This ensures we always have a working logger even if the original was closed
+		defaultLogger = &Logger{
+			logger:      log.New(os.Stdout, "", log.LstdFlags|log.Lshortfile),
+			broadcast:   make(chan string, 100),
+			subscribers: make(map[chan string]bool),
+			closed:      false,
+		}
+		go defaultLogger.broadcastLoop()
+	}
+	
 	return defaultLogger
 }
 
-// Subscribe returns a channel that receives log messages
-func (l *Logger) Subscribe() <-chan string {
+// Subscribe creates a new channel for this client and subscribes it
+// Returns the channel that will receive log messages
+// If the logger is closed, returns nil
+// Also returns the bidirectional channel for unsubscribe
+func (l *Logger) Subscribe() (<-chan string, chan string) {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.broadcast
+	closed := l.closed
+	l.mu.RUnlock()
+	
+	if closed {
+		return nil, nil
+	}
+	
+	// Create a per-client channel (like the client's broadcaster pattern)
+	clientChan := make(chan string, 10)
+	
+	l.subMu.Lock()
+	l.subscribers[clientChan] = true
+	l.subMu.Unlock()
+	
+	return clientChan, clientChan
+}
+
+// Unsubscribe removes a client channel from subscribers
+func (l *Logger) Unsubscribe(ch chan string) {
+	if ch == nil {
+		return
+	}
+	
+	l.subMu.Lock()
+	defer l.subMu.Unlock()
+	
+	if l.subscribers[ch] {
+		delete(l.subscribers, ch)
+		close(ch)
+	}
+}
+
+// broadcastLoop reads from the main broadcast channel and forwards to all subscribers
+func (l *Logger) broadcastLoop() {
+	for logLine := range l.broadcast {
+		l.subMu.RLock()
+		subscribers := make([]chan string, 0, len(l.subscribers))
+		for ch := range l.subscribers {
+			subscribers = append(subscribers, ch)
+		}
+		l.subMu.RUnlock()
+		
+		// Send to all subscribers (non-blocking)
+		for _, ch := range subscribers {
+			select {
+			case ch <- logLine:
+			default:
+				// Channel full, skip this subscriber
+			}
+		}
+	}
 }
 
 // logMessage writes a log message and broadcasts it

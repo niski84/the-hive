@@ -37,6 +37,18 @@ func NewClientDB(configDir string) (*ClientDB, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Enable WAL mode for concurrent read/write access
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+	}
+
+	// Set busy timeout to prevent indefinite hanging
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
+	}
+
 	clientDB := &ClientDB{db: db}
 
 	if err := clientDB.initSchema(); err != nil {
