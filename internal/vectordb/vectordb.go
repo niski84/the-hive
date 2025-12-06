@@ -24,10 +24,12 @@ type Match struct {
 // VectorDB describes the behaviour required by the Hive service.
 type VectorDB interface {
 	Upsert(ctx context.Context, id string, vector []float32, metadata map[string]string) error
-	Search(ctx context.Context, queryVector []float32, topK int) ([]Match, error)
+	Search(ctx context.Context, queryVector []float32, topK int, organizationID string) ([]Match, error)
 	Delete(ctx context.Context, id string) error
 	GetPointCount(ctx context.Context) (int, error)
 	UpdatePayload(ctx context.Context, id string, tags []string) error
+	PurgeCollection(ctx context.Context) error // Delete all points from the collection
+	PurgeByOrganization(ctx context.Context, organizationID string) (int, error) // Delete all points for a specific organization
 }
 
 // QdrantVectorDB is a thin wrapper around the Qdrant service clients.
@@ -111,6 +113,7 @@ func (q *QdrantVectorDB) ensureCollection(ctx context.Context, dim int) error {
 }
 
 // Upsert stores or updates a vector in Qdrant.
+// CRITICAL: organization_id must be included in metadata for multi-tenancy isolation
 func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32, metadata map[string]string) error {
 	if len(vector) == 0 {
 		return errors.New("vector cannot be empty")
@@ -133,8 +136,19 @@ func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32
 			Kind: &qdrant.Value_StringValue{StringValue: docID},
 		}
 	}
+	
+	// CRITICAL: Always include organization_id in payload for multi-tenancy
+	// If not provided, log a warning but don't fail (for backward compatibility during migration)
+	if orgID, ok := metadata["organization_id"]; ok && orgID != "" {
+		payload["organization_id"] = &qdrant.Value{
+			Kind: &qdrant.Value_StringValue{StringValue: orgID},
+		}
+	} else {
+		log.Printf("Warning: Upsert called without organization_id for point %s - multi-tenancy isolation may be compromised", id)
+	}
+	
 	for k, v := range metadata {
-		if k != "document_id" {
+		if k != "document_id" && k != "organization_id" {
 			payload[k] = &qdrant.Value{
 				Kind: &qdrant.Value_StringValue{StringValue: v},
 			}
@@ -179,7 +193,9 @@ func (q *QdrantVectorDB) Upsert(ctx context.Context, id string, vector []float32
 }
 
 // Search performs a similarity search.
-func (q *QdrantVectorDB) Search(ctx context.Context, queryVector []float32, topK int) ([]Match, error) {
+// CRITICAL: organizationID must be provided for multi-tenancy isolation
+// If organizationID is empty, search will return results from all organizations (backward compatibility)
+func (q *QdrantVectorDB) Search(ctx context.Context, queryVector []float32, topK int, organizationID string) ([]Match, error) {
 	if len(queryVector) == 0 {
 		return nil, errors.New("query vector cannot be empty")
 	}
@@ -188,14 +204,39 @@ func (q *QdrantVectorDB) Search(ctx context.Context, queryVector []float32, topK
 		topK = 10
 	}
 
-	// Perform search
-	searchResult, err := q.pointsSvc.Search(ctx, &qdrant.SearchPoints{
+	// Build search request
+	searchReq := &qdrant.SearchPoints{
 		CollectionName: q.collection,
 		Vector:         queryVector,
 		Limit:          uint64(topK),
 		WithPayload:    &qdrant.WithPayloadSelector{SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: true}},
 		WithVectors:    &qdrant.WithVectorsSelector{SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: false}},
-	})
+	}
+	
+	// CRITICAL: Apply organization filter for multi-tenancy isolation
+	if organizationID != "" {
+		searchReq.Filter = &qdrant.Filter{
+			Must: []*qdrant.Condition{
+				{
+					ConditionOneOf: &qdrant.Condition_Field{
+						Field: &qdrant.FieldCondition{
+							Key: "organization_id",
+							Match: &qdrant.Match{
+								MatchValue: &qdrant.Match_Keyword{
+									Keyword: organizationID,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	} else {
+		log.Printf("Warning: Search called without organizationID - results may include data from all organizations")
+	}
+
+	// Perform search
+	searchResult, err := q.pointsSvc.Search(ctx, searchReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
 	}
@@ -356,6 +397,197 @@ func (q *QdrantVectorDB) Delete(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+// PurgeCollection deletes all points from the collection
+func (q *QdrantVectorDB) PurgeCollection(ctx context.Context) error {
+	log.Printf("Purging all points from collection %s", q.collection)
+	
+	// Get all point IDs using Scroll API
+	// Scroll with a large limit and no filter gets all points
+	pointIDs := make([]*qdrant.PointId, 0)
+	var offset *qdrant.PointId = nil
+	limit := uint32(1000) // Get 1000 at a time
+	
+	for {
+		scrollRequest := &qdrant.ScrollPoints{
+			CollectionName: q.collection,
+			Filter:         nil, // No filter = all points
+			WithPayload:    &qdrant.WithPayloadSelector{SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: false}},
+			WithVectors:    &qdrant.WithVectorsSelector{SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: false}},
+		}
+		
+		// Set offset if we have one
+		if offset != nil {
+			scrollRequest.Offset = offset
+		}
+		
+		// Set limit
+		scrollRequest.Limit = &limit
+		
+		scrollResult, err := q.pointsSvc.Scroll(ctx, scrollRequest)
+		
+		if err != nil {
+			return fmt.Errorf("failed to scroll points for purge: %w", err)
+		}
+		
+		// Extract point IDs from this batch
+		for _, point := range scrollResult.Result {
+			if point.Id != nil {
+				pointIDs = append(pointIDs, point.Id)
+			}
+		}
+		
+		// Check if we got all points (next_page_offset will be nil if done)
+		if scrollResult.NextPageOffset == nil || len(scrollResult.Result) == 0 {
+			break
+		}
+		
+		// Continue scrolling from the next offset
+		offset = scrollResult.NextPageOffset
+	}
+	
+	if len(pointIDs) == 0 {
+		log.Printf("No points to purge in collection %s", q.collection)
+		return nil
+	}
+	
+	log.Printf("Found %d points to delete from collection %s", len(pointIDs), q.collection)
+	
+	// Delete all points in batches (Qdrant may have limits on batch size)
+	batchSize := 1000
+	for i := 0; i < len(pointIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(pointIDs) {
+			end = len(pointIDs)
+		}
+		batch := pointIDs[i:end]
+		
+		_, err := q.pointsSvc.Delete(ctx, &qdrant.DeletePoints{
+			CollectionName: q.collection,
+			Points: &qdrant.PointsSelector{
+				PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+					Points: &qdrant.PointsIdsList{
+						Ids: batch,
+					},
+				},
+			},
+		})
+		
+		if err != nil {
+			return fmt.Errorf("failed to delete batch %d-%d: %w", i, end, err)
+		}
+		log.Printf("Deleted batch %d-%d (%d points)", i, end, len(batch))
+	}
+	
+	log.Printf("Successfully purged %d points from collection %s", len(pointIDs), q.collection)
+	return nil
+}
+
+// PurgeByOrganization deletes all points for a specific organization
+func (q *QdrantVectorDB) PurgeByOrganization(ctx context.Context, organizationID string) (int, error) {
+	if organizationID == "" {
+		return 0, errors.New("organizationID is required")
+	}
+	
+	log.Printf("Purging points for organization %s from collection %s", organizationID, q.collection)
+	
+	// Build filter for organization_id
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			{
+				ConditionOneOf: &qdrant.Condition_Field{
+					Field: &qdrant.FieldCondition{
+						Key: "organization_id",
+						Match: &qdrant.Match{
+							MatchValue: &qdrant.Match_Keyword{
+								Keyword: organizationID,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	
+	// Get all point IDs using Scroll API with filter
+	pointIDs := make([]*qdrant.PointId, 0)
+	var offset *qdrant.PointId = nil
+	limit := uint32(1000) // Get 1000 at a time
+	
+	for {
+		scrollRequest := &qdrant.ScrollPoints{
+			CollectionName: q.collection,
+			Filter:         filter, // Filter by organization_id
+			WithPayload:    &qdrant.WithPayloadSelector{SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: false}},
+			WithVectors:    &qdrant.WithVectorsSelector{SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: false}},
+		}
+		
+		// Set offset if we have one
+		if offset != nil {
+			scrollRequest.Offset = offset
+		}
+		
+		// Set limit
+		scrollRequest.Limit = &limit
+		
+		scrollResult, err := q.pointsSvc.Scroll(ctx, scrollRequest)
+		
+		if err != nil {
+			return 0, fmt.Errorf("failed to scroll points for purge: %w", err)
+		}
+		
+		// Extract point IDs from this batch
+		for _, point := range scrollResult.Result {
+			if point.Id != nil {
+				pointIDs = append(pointIDs, point.Id)
+			}
+		}
+		
+		// Check if we got all points (next_page_offset will be nil if done)
+		if scrollResult.NextPageOffset == nil || len(scrollResult.Result) == 0 {
+			break
+		}
+		
+		// Continue scrolling from the next offset
+		offset = scrollResult.NextPageOffset
+	}
+	
+	if len(pointIDs) == 0 {
+		log.Printf("No points to purge for organization %s in collection %s", organizationID, q.collection)
+		return 0, nil
+	}
+	
+	log.Printf("Found %d points to delete for organization %s from collection %s", len(pointIDs), organizationID, q.collection)
+	
+	// Delete all points in batches (Qdrant may have limits on batch size)
+	batchSize := 1000
+	for i := 0; i < len(pointIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(pointIDs) {
+			end = len(pointIDs)
+		}
+		batch := pointIDs[i:end]
+		
+		_, err := q.pointsSvc.Delete(ctx, &qdrant.DeletePoints{
+			CollectionName: q.collection,
+			Points: &qdrant.PointsSelector{
+				PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+					Points: &qdrant.PointsIdsList{
+						Ids: batch,
+					},
+				},
+			},
+		})
+		
+		if err != nil {
+			return 0, fmt.Errorf("failed to delete batch %d-%d: %w", i, end, err)
+		}
+		log.Printf("Deleted batch %d-%d (%d points) for organization %s", i, end, len(batch), organizationID)
+	}
+	
+	log.Printf("Successfully purged %d points for organization %s from collection %s", len(pointIDs), organizationID, q.collection)
+	return len(pointIDs), nil
 }
 
 // getMetadataKeys returns all keys from metadata map (helper for debugging)

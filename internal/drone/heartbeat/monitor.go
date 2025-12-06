@@ -19,7 +19,7 @@ type Monitor struct {
 	serverURL      string
 	apiKey         string
 	ticker         *time.Ticker
-	status         string // "up", "down", "unknown"
+	status         string // "up", "down", "unknown", "disabled_on_server"
 	failureCount   int
 	mu             sync.RWMutex
 	statusCallback func(status string) // Callback to update UI
@@ -102,6 +102,23 @@ func (m *Monitor) checkHealth() {
 	}
 	defer resp.Body.Close()
 
+	// Check for disabled key response (401 with key_disabled error)
+	if resp.StatusCode == http.StatusUnauthorized {
+		var errorResponse struct {
+			Error  string `json:"error"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err == nil {
+			if errorResponse.Error == "key_disabled" || errorResponse.Status == "key_disabled" {
+				m.handleKeyDisabled()
+				return
+			}
+		}
+		// If not key_disabled, treat as regular failure
+		m.handleFailure()
+		return
+	}
+
 	if resp.StatusCode == http.StatusOK {
 		var healthResponse struct {
 			Status  string `json:"status"`
@@ -131,6 +148,23 @@ func (m *Monitor) handleSuccess() {
 
 	if m.statusCallback != nil {
 		m.statusCallback("up")
+	}
+}
+
+// handleKeyDisabled handles when the API key is disabled on the server
+func (m *Monitor) handleKeyDisabled() {
+	m.mu.Lock()
+	wasDisabled := m.status == "disabled_on_server"
+	m.status = "disabled_on_server"
+	m.failureCount = 0
+	m.mu.Unlock()
+
+	if !wasDisabled {
+		log.Printf("API key is disabled on server: %s", m.serverURL)
+	}
+
+	if m.statusCallback != nil {
+		m.statusCallback("disabled_on_server")
 	}
 }
 

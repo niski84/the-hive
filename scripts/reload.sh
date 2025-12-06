@@ -114,6 +114,36 @@ if ! kill -0 $CLIENT_PID 2>/dev/null; then
     exit 1
 fi
 
+# Check for errors in drone-client.log
+echo "Checking drone-client.log for errors..."
+if [ -f drone-client.log ]; then
+    # Look for common error patterns (case-insensitive)
+    # Filter out informational messages that contain error-like words
+    ERRORS=$(grep -iE "(error|fatal|failed|panic|exception)" drone-client.log | \
+        grep -vE "(will retry|Skipping file|File unchanged|Successfully|Success)" | \
+        grep -vE "^[0-9]{4}/[0-9]{2}/[0-9]{2}.*(Successfully|Success)" || true)
+    
+    if [ -n "$ERRORS" ]; then
+        echo ""
+        echo "❌ Errors found in drone-client.log!"
+        echo "=========================================="
+        echo "Error details:"
+        echo "=========================================="
+        echo "$ERRORS"
+        echo "=========================================="
+        echo ""
+        echo "Full log file:"
+        echo "=========================================="
+        cat drone-client.log
+        echo "=========================================="
+        exit 1
+    else
+        echo "✅ No errors found in drone-client.log"
+    fi
+else
+    echo "⚠️  drone-client.log not found (may be normal if client just started)"
+fi
+
 echo ""
 echo "=========================================="
 echo "✅ Both services started!"

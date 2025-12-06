@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/watch-paths", s.handleWatchPaths)
 	mux.HandleFunc("/api/watch-paths/add", s.handleAddWatchPath)
 	mux.HandleFunc("/api/watch-paths/remove", s.handleRemoveWatchPath)
+	mux.HandleFunc("/api/watch-paths/toggle", s.handleToggleWatchPath)
 	mux.HandleFunc("/api/v1/shutdown", s.handleShutdown)
 
 	return mux
@@ -160,10 +163,44 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	config := s.config
+	watchPaths := config.WatchPaths
+	disabledPaths := config.DisabledPaths
 	s.mu.RUnlock()
 
+	// Validate all paths and add validation status
+	pathStatus := make(map[string]map[string]interface{})
+	for _, path := range watchPaths {
+		isValid, err := validatePath(path)
+		isDisabled := false
+		for _, disabled := range disabledPaths {
+			if path == disabled {
+				isDisabled = true
+				break
+			}
+		}
+		
+		pathStatus[path] = map[string]interface{}{
+			"valid":    isValid,
+			"disabled": isDisabled,
+		}
+		if !isValid {
+			pathStatus[path]["error"] = err.Error()
+		}
+	}
+
+	// Create response with path validation
+	response := map[string]interface{}{
+		"Server":          config.Server,
+		"GrpcServerAddress": config.GrpcServerAddress,
+		"APIKey":          config.APIKey,
+		"WatchPaths":      config.WatchPaths,
+		"DisabledPaths":   config.DisabledPaths,
+		"WebServer":       config.WebServer,
+		"PathStatus":      pathStatus,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config)
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleSaveConfig saves configuration changes
@@ -193,6 +230,9 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	if len(newConfig.WatchPaths) > 0 {
 		s.config.WatchPaths = newConfig.WatchPaths
 	}
+	if len(newConfig.DisabledPaths) >= 0 {
+		s.config.DisabledPaths = newConfig.DisabledPaths
+	}
 	if newConfig.WebServer.Port > 0 {
 		s.config.WebServer.Port = newConfig.WebServer.Port
 	}
@@ -210,7 +250,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reload watcher with new paths
-	if err := s.watcherMgr.Reload(config.WatchPaths); err != nil {
+	if err := s.watcherMgr.Reload(config.WatchPaths, config.DisabledPaths); err != nil {
 		log.Printf("Failed to reload watcher: %v", err)
 		http.Error(w, fmt.Sprintf("Config saved but watcher reload failed: %v", err), http.StatusInternalServerError)
 		return
@@ -218,6 +258,35 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// validatePath checks if a path is valid and accessible
+func validatePath(path string) (bool, error) {
+	if path == "" {
+		return false, fmt.Errorf("path is empty")
+	}
+	
+	// Try to resolve absolute path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false, fmt.Errorf("invalid path format: %w", err)
+	}
+	
+	// Check if path exists
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, fmt.Errorf("path does not exist")
+		}
+		return false, fmt.Errorf("cannot access path: %w", err)
+	}
+	
+	// Check if it's a directory (we only watch directories)
+	if !info.IsDir() {
+		return false, fmt.Errorf("path is not a directory")
+	}
+	
+	return true, nil
 }
 
 // handleStatus returns current status
@@ -228,9 +297,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := s.watcherMgr.Status()
+	
+	// Get all configured paths and validate them
+	s.mu.RLock()
+	allPaths := s.config.WatchPaths
+	disabledPaths := s.config.DisabledPaths
+	s.mu.RUnlock()
+	
+	// Create a map of path validation status
+	pathStatus := make(map[string]map[string]interface{})
+	for _, path := range allPaths {
+		isValid, err := validatePath(path)
+		isDisabled := false
+		for _, disabled := range disabledPaths {
+			if path == disabled {
+				isDisabled = true
+				break
+			}
+		}
+		
+		pathStatus[path] = map[string]interface{}{
+			"valid":    isValid,
+			"disabled": isDisabled,
+		}
+		if !isValid {
+			pathStatus[path]["error"] = err.Error()
+		}
+	}
+	
+	// Add path validation to status
+	statusWithValidation := map[string]interface{}{
+		"watching_paths": status.WatchingPaths,
+		"total_files":    status.TotalFiles,
+		"processed":      status.Processed,
+		"errors":         status.Errors,
+		"path_status":    pathStatus,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(statusWithValidation)
 }
 
 // handleServerStatus returns the Hive server connection status
@@ -298,10 +403,26 @@ func (s *Server) handleWatchPaths(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.RLock()
 	paths := s.config.WatchPaths
+	disabledPaths := s.config.DisabledPaths
 	s.mu.RUnlock()
 
+	// Create a map of disabled paths for quick lookup
+	disabledMap := make(map[string]bool)
+	for _, p := range disabledPaths {
+		disabledMap[p] = true
+	}
+
+	// Build response with enabled status
+	pathList := []map[string]interface{}{}
+	for _, path := range paths {
+		pathList = append(pathList, map[string]interface{}{
+			"path":    path,
+			"enabled": !disabledMap[path],
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"paths": paths})
+	json.NewEncoder(w).Encode(map[string]interface{}{"paths": pathList})
 }
 
 // handleAddWatchPath adds a new watch path
@@ -338,7 +459,7 @@ func (s *Server) handleAddWatchPath(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	// Reload watcher
-	if err := s.watcherMgr.Reload(config.WatchPaths); err != nil {
+	if err := s.watcherMgr.Reload(config.WatchPaths, config.DisabledPaths); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to add watch path: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -379,10 +500,72 @@ func (s *Server) handleRemoveWatchPath(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	// Reload watcher
-	if err := s.watcherMgr.Reload(config.WatchPaths); err != nil {
+	if err := s.watcherMgr.Reload(config.WatchPaths, config.DisabledPaths); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to remove watch path: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Save config
+	if err := drone.SaveConfig(config, ""); err != nil {
+		log.Printf("Failed to save config: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleToggleWatchPath toggles a watch path between enabled and disabled
+func (s *Server) handleToggleWatchPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Path    string `json:"path"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Path == "" {
+		http.Error(w, "Path is required", http.StatusBadRequest)
+		return
+	}
+
+	// Toggle the path
+	if err := s.watcherMgr.TogglePath(req.Path, req.Enabled); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to toggle path: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Update config
+	s.mu.Lock()
+	// Update disabled paths in config
+	newDisabled := []string{}
+	for _, p := range s.config.DisabledPaths {
+		if p != req.Path {
+			newDisabled = append(newDisabled, p)
+		}
+	}
+	if !req.Enabled {
+		// Add to disabled if not already there
+		found := false
+		for _, p := range newDisabled {
+			if p == req.Path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			newDisabled = append(newDisabled, req.Path)
+		}
+	}
+	s.config.DisabledPaths = newDisabled
+	config := s.config
+	s.mu.Unlock()
 
 	// Save config
 	if err := drone.SaveConfig(config, ""); err != nil {
@@ -401,6 +584,40 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Shutting down request received...")
+
+	// Notify Hive server that this client is shutting down
+	s.mu.RLock()
+	serverAddr := s.config.Server.Address
+	apiKey := s.config.APIKey
+	s.mu.RUnlock()
+
+	// If server address and API key are configured, notify the server
+	if serverAddr != "" && apiKey != "" {
+		// Convert gRPC address to HTTP address if needed
+		serverURL := serverAddr
+		if !strings.Contains(serverURL, "://") {
+			serverURL = "http://" + strings.Replace(serverURL, ":50051", ":8081", 1)
+		}
+
+		// Call server shutdown notification endpoint
+		shutdownURL := fmt.Sprintf("%s/api/v1/client/shutdown", serverURL)
+		req, err := http.NewRequest("POST", shutdownURL, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				log.Printf("Notified Hive server of client shutdown")
+			} else {
+				log.Printf("Failed to notify Hive server of shutdown: %v", err)
+			}
+		} else {
+			log.Printf("Failed to create shutdown notification request: %v", err)
+		}
+	}
 
 	// Send response before shutting down
 	w.Header().Set("Content-Type", "application/json")

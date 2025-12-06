@@ -4,123 +4,120 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/the-hive/internal/database"
 )
 
-// HandleGenerateAPIKey handles POST /api/v1/keys/generate
-func HandleGenerateAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
-	log.Printf("API Key Manager: Receiving POST /api/v1/keys/generate request")
-	
-	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
-		return
-	}
-
-	var req struct {
-		ClientName string `json:"client_name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Printf("API Key Manager: Error decoding request: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
-		return
-	}
-
-	if req.ClientName == "" {
-		req.ClientName = "Unnamed Client"
-	}
-
-	log.Printf("API Key Manager: Generating key for client: %s", req.ClientName)
-	key, err := apiKeyStore.GenerateKey(req.ClientName)
-	if err != nil {
-		log.Printf("API Key Manager: Error generating key: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	log.Printf("API Key Manager: Successfully generated key: %s", key)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"key":         key,
-		"client_name": req.ClientName,
-	})
-}
-
-// HandleListAPIKeys handles GET /api/v1/keys
+// HandleListAPIKeys lists all API keys for the current organization
 func HandleListAPIKeys(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
-	// Removed noisy logging - this endpoint is polled frequently by the UI
-	// log.Printf("API Key Manager: Receiving GET /api/v1/keys request")
-	
 	if r.Method != http.MethodGet {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	keys, err := apiKeyStore.ListKeys()
 	if err != nil {
-		log.Printf("API Key Manager: Error listing keys: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Removed noisy logging - this endpoint is polled frequently by the UI
-	// log.Printf("API Key Manager: Returning %d keys", len(keys))
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"keys": keys,
-	})
+	json.NewEncoder(w).Encode(keys)
 }
 
-// HandleRevokeAPIKey handles POST /api/v1/keys/revoke
+// HandleGenerateAPIKey generates a new API key
+func HandleGenerateAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get organization ID from context (set by RequireTenant middleware)
+	orgID := r.Context().Value("organization_id")
+	if orgID == nil {
+		http.Error(w, "Organization not found", http.StatusInternalServerError)
+		return
+	}
+
+	orgIDStr, ok := orgID.(string)
+	if !ok {
+		http.Error(w, "Invalid organization ID", http.StatusInternalServerError)
+		return
+	}
+
+	key, err := apiKeyStore.GenerateKey(orgIDStr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(key)
+}
+
+// HandleRevokeAPIKey revokes an API key
 func HandleRevokeAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req struct {
-		Key string `json:"key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
+	keyID := r.URL.Query().Get("id")
+	if keyID == "" {
+		http.Error(w, "Key ID required", http.StatusBadRequest)
 		return
 	}
 
-	if req.Key == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "key is required"})
+	err := apiKeyStore.RevokeKey(keyID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if err := apiKeyStore.RevokeKey(req.Key); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// HandleEnableAPIKey enables an API key
+func HandleEnableAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	keyID := r.URL.Query().Get("id")
+	if keyID == "" {
+		http.Error(w, "Key ID required", http.StatusBadRequest)
+		return
+	}
+
+	err := apiKeyStore.EnableKey(keyID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleDeleteAPIKey deletes an API key
+func HandleDeleteAPIKey(w http.ResponseWriter, r *http.Request, apiKeyStore *database.APIKeyStore) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	keyID := r.URL.Query().Get("id")
+	if keyID == "" {
+		http.Error(w, "Key ID required", http.StatusBadRequest)
+		return
+	}
+
+	err := apiKeyStore.DeleteKey(keyID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}

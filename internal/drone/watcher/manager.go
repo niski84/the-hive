@@ -26,6 +26,7 @@ import (
 // Manager manages file watchers for multiple directories
 type Manager struct {
 	watchPaths       []string
+	disabledPaths    []string // Paths that are configured but disabled
 	serverAddr       string
 	clientID         string
 	eventBroadcaster *events.Broadcaster
@@ -50,7 +51,7 @@ type Status struct {
 }
 
 // NewManager creates a new watcher manager
-func NewManager(watchPaths []string, serverAddr string, grpcServerAddr string, clientID string, broadcaster *events.Broadcaster, configDir string) (*Manager, error) {
+func NewManager(watchPaths []string, disabledPaths []string, serverAddr string, grpcServerAddr string, clientID string, broadcaster *events.Broadcaster, configDir string) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize database
@@ -68,6 +69,7 @@ func NewManager(watchPaths []string, serverAddr string, grpcServerAddr string, c
 
 	mgr := &Manager{
 		watchPaths:       watchPaths,
+		disabledPaths:    disabledPaths,
 		serverAddr:       serverAddr,
 		clientID:         clientID,
 		eventBroadcaster: broadcaster,
@@ -118,10 +120,23 @@ func (m *Manager) Start(ctx context.Context) error {
 		go m.processFile(filePath)
 	}
 
+	// Only watch paths that are not disabled
 	for _, path := range m.watchPaths {
-		if err := m.addWatchPath(path); err != nil {
-			log.Printf("Failed to watch path %s: %v", path, err)
-			continue
+		// Check if path is disabled
+		isDisabled := false
+		for _, disabled := range m.disabledPaths {
+			if path == disabled {
+				isDisabled = true
+				break
+			}
+		}
+		if !isDisabled {
+			if err := m.addWatchPath(path); err != nil {
+				log.Printf("Failed to watch path %s: %v", path, err)
+				continue
+			}
+		} else {
+			log.Printf("Path %s is disabled, skipping", path)
 		}
 	}
 
@@ -159,11 +174,12 @@ func (m *Manager) Stop() {
 }
 
 // Reload reloads watchers with new paths
-func (m *Manager) Reload(newPaths []string) error {
+func (m *Manager) Reload(newPaths []string, disabledPaths []string) error {
 	m.Stop()
 
 	m.mu.Lock()
 	m.watchPaths = newPaths
+	m.disabledPaths = disabledPaths
 	m.watchers = make(map[string]*fsnotify.Watcher)
 	ctx, cancel := context.WithCancel(context.Background())
 	m.ctx = ctx
@@ -171,6 +187,70 @@ func (m *Manager) Reload(newPaths []string) error {
 	m.mu.Unlock()
 
 	return m.Start(context.Background())
+}
+
+// TogglePath enables or disables a watch path
+func (m *Manager) TogglePath(path string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if path exists in watchPaths
+	pathExists := false
+	for _, p := range m.watchPaths {
+		if p == path {
+			pathExists = true
+			break
+		}
+	}
+
+	if !pathExists {
+		return fmt.Errorf("path %s is not in watch paths", path)
+	}
+
+	// Update disabled paths
+	newDisabled := []string{}
+	for _, p := range m.disabledPaths {
+		if p != path {
+			newDisabled = append(newDisabled, p)
+		}
+	}
+
+	if !enabled {
+		// Add to disabled if not already there
+		found := false
+		for _, p := range newDisabled {
+			if p == path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			newDisabled = append(newDisabled, path)
+		}
+		// Remove watcher if it exists
+		if watcher, exists := m.watchers[path]; exists {
+			watcher.Close()
+			delete(m.watchers, path)
+			log.Printf("Disabled watching path: %s", path)
+		}
+	} else {
+		// Remove from disabled and add watcher
+		m.disabledPaths = newDisabled
+		// Add watcher if not already watching
+		if _, exists := m.watchers[path]; !exists {
+			if err := m.addWatchPath(path); err != nil {
+				return fmt.Errorf("failed to enable path %s: %w", path, err)
+			}
+			// Start event processing for this watcher
+			m.wg.Add(1)
+			go m.processEvents(path, m.watchers[path])
+			log.Printf("Enabled watching path: %s", path)
+		}
+		return nil
+	}
+
+	m.disabledPaths = newDisabled
+	return nil
 }
 
 // Status returns current status
@@ -322,12 +402,7 @@ func (m *Manager) processFile(filePath string) {
 	// Use decision engine to determine if we should process this file
 	decision, err := m.decisionEngine.Decide(filePath)
 	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to decide on file %s: %v", filePath, err)
-		log.Printf(errorMsg)
-		m.eventBroadcaster.BroadcastJSON("file_error", errorMsg, map[string]interface{}{
-			"path":  filePath,
-			"error": err.Error(),
-		})
+		log.Printf("Failed to make decision for file %s: %v", filePath, err)
 		return
 	}
 
@@ -349,29 +424,20 @@ func (m *Manager) processFile(filePath string) {
 	// Extract text using the parser dispatcher
 	text, err := parser.ParseFile(filePath)
 	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to extract text from %s: %v", filePath, err)
-		log.Printf(errorMsg)
-		m.eventBroadcaster.BroadcastJSON("file_error", errorMsg, map[string]interface{}{
+		log.Printf("Failed to parse file %s: %v", filePath, err)
+		m.eventBroadcaster.BroadcastJSON("file_error", fmt.Sprintf("Parse error: %s", err.Error()), map[string]interface{}{
 			"path":  filePath,
 			"error": err.Error(),
 		})
-		// Mark as failed in database
-		m.decisionEngine.MarkProcessed(decision, "failed")
-		return
-	}
-
-	if text == "" {
-		log.Printf("No text extracted from %s", filePath)
-		m.decisionEngine.MarkProcessed(decision, "no_content")
+		m.decisionEngine.MarkProcessed(decision, "chunk_failed")
 		return
 	}
 
 	// Chunk the text
 	chunks, err := m.chunker.ChunkText(text)
 	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to chunk text from %s: %v", filePath, err)
-		log.Printf(errorMsg)
-		m.eventBroadcaster.BroadcastJSON("file_error", errorMsg, map[string]interface{}{
+		log.Printf("Failed to chunk text from %s: %v", filePath, err)
+		m.eventBroadcaster.BroadcastJSON("file_error", fmt.Sprintf("Chunk error: %s", err.Error()), map[string]interface{}{
 			"path":  filePath,
 			"error": err.Error(),
 		})
@@ -400,13 +466,14 @@ func (m *Manager) processFile(filePath string) {
 
 	// Prepare metadata with file hash, ingest type, and client_id
 	metadata := map[string]string{
-		"filename":    filepath.Base(filePath),
-		"path":        filePath,
-		"file_path":   filePath, // Ensure file_path is set for UUID generation
-		"filetype":    fileType,
-		"file_hash":   decision.FileHash,
-		"ingest_type": string(decision.IngestType),
-		"client_id":   m.clientID,
+		"filename":     filepath.Base(filePath),
+		"path":         filePath,
+		"file_path":    filePath, // Ensure file_path is set for UUID generation
+		"filetype":     fileType,
+		"file_hash":    decision.FileHash,
+		"ingest_type":  string(decision.IngestType),
+		"client_id":    m.clientID,
+		"total_chunks": fmt.Sprintf("%d", len(chunks)), // Add total chunks to metadata
 	}
 
 	for i, chunk := range chunks {

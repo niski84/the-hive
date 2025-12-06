@@ -15,10 +15,11 @@ import (
 )
 
 // AskQuestion asks a yes/no question and returns YES or NO
-func AskQuestion(ctx context.Context, prompt string) (string, error) {
+// Returns the answer and usage information
+func AskQuestion(ctx context.Context, prompt string) (string, *Usage, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		return "", fmt.Errorf("OPENAI_API_KEY not set")
+		return "", nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
 
 	// Use OpenAI Chat API for better yes/no answers
@@ -55,12 +56,12 @@ func AskQuestion(ctx context.Context, prompt string) (string, error) {
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -69,13 +70,13 @@ func AskQuestion(ctx context.Context, prompt string) (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("OpenAI API error: %d - %s", resp.StatusCode, string(body))
+		return "", nil, fmt.Errorf("OpenAI API error: %d - %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -84,28 +85,45 @@ func AskQuestion(ctx context.Context, prompt string) (string, error) {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+		Model string `json:"model"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("no response from OpenAI")
+		return "", nil, fmt.Errorf("no response from OpenAI")
 	}
 
 	answer := strings.TrimSpace(result.Choices[0].Message.Content)
 	
+	// Extract usage information
+	usage := &Usage{
+		InputTokens:  result.Usage.PromptTokens,
+		OutputTokens: result.Usage.CompletionTokens,
+	}
+	if result.Model != "" {
+		usage.Model = result.Model
+	} else {
+		usage.Model = "gpt-3.5-turbo" // Default model
+	}
+	
 	// Normalize answer to YES or NO
 	answerUpper := strings.ToUpper(answer)
 	if strings.Contains(answerUpper, "YES") {
-		return "YES", nil
+		return "YES", usage, nil
 	}
 	if strings.Contains(answerUpper, "NO") {
-		return "NO", nil
+		return "NO", usage, nil
 	}
 
 	// Default to NO if unclear
-	return "NO", nil
+	return "NO", usage, nil
 }
 

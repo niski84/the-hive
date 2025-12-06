@@ -28,7 +28,14 @@ func HandleAuditLogs(w http.ResponseWriter, r *http.Request, auditLogStore *data
 		}
 	}
 
-	logs, err := auditLogStore.GetRecentLogs(limit)
+	// Get organization ID from context
+	orgID := ""
+	if orgIDVal := r.Context().Value("organization_id"); orgIDVal != nil {
+		if orgIDStr, ok := orgIDVal.(string); ok {
+			orgID = orgIDStr
+		}
+	}
+	logs, err := auditLogStore.GetRecentLogs(limit, "", orgID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

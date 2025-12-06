@@ -4,6 +4,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
@@ -55,8 +56,21 @@ func TestRedisQueue_EnqueueDequeue(t *testing.T) {
 		t.Errorf("Expected job type %s, got %s", job.Type, dequeued.Type)
 	}
 
-	if string(dequeued.Payload) != string(job.Payload) {
-		t.Errorf("Expected payload %s, got %s", string(job.Payload), string(dequeued.Payload))
+	// Compare JSON payloads by normalizing whitespace (JSON can have different formatting)
+	// Unmarshal both to ensure they're equivalent JSON
+	var expectedPayload, actualPayload map[string]interface{}
+	if err := json.Unmarshal(job.Payload, &expectedPayload); err != nil {
+		t.Fatalf("Failed to unmarshal expected payload: %v", err)
+	}
+	if err := json.Unmarshal(dequeued.Payload, &actualPayload); err != nil {
+		t.Fatalf("Failed to unmarshal actual payload: %v", err)
+	}
+
+	// Compare the unmarshaled objects
+	expectedJSON, _ := json.Marshal(expectedPayload)
+	actualJSON, _ := json.Marshal(actualPayload)
+	if string(expectedJSON) != string(actualJSON) {
+		t.Errorf("Expected payload %s, got %s", string(expectedJSON), string(actualJSON))
 	}
 }
 

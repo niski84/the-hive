@@ -77,10 +77,11 @@ Author: Nicholas Skitch
                 <!-- Watch Paths -->
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Watch Paths</label>
+                    <div id="watchPathsList" class="space-y-2 mb-3"></div>
                     <textarea 
                         id="watchPaths" 
                         name="watch_paths"
-                        rows="6"
+                        rows="3"
                         placeholder="/path/to/watch&#10;/another/path"
                         class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm"
                     ></textarea>
@@ -153,7 +154,13 @@ Author: Nicholas Skitch
                 
                 // Set watch paths
                 const paths = config.WatchPaths || config.watch_paths || [];
+                const disabledPaths = config.DisabledPaths || config.disabled_paths || [];
+                const disabledSet = new Set(disabledPaths);
+                const pathStatus = config.PathStatus || {};
                 document.getElementById('watchPaths').value = paths.join('\n');
+                
+                // Render watch paths list with toggle buttons
+                renderWatchPathsList(paths, disabledSet, pathStatus);
             } catch (error) {
                 console.error('Failed to load config:', error);
                 document.getElementById('saveStatus').innerHTML = '<div class="text-red-600">Failed to load configuration</div>';
@@ -265,6 +272,114 @@ Author: Nicholas Skitch
             } catch (error) {
                 console.error('Failed to shutdown client:', error);
                 statusDiv.innerHTML = '<div class="text-red-600">Error: ' + error.message + '</div>';
+            }
+        }
+
+        // Render watch paths list with toggle buttons
+        function renderWatchPathsList(paths, disabledSet, pathStatus) {
+            const container = document.getElementById('watchPathsList');
+            if (paths.length === 0) {
+                container.innerHTML = '<p class="text-sm text-gray-500">No watch paths configured</p>';
+                return;
+            }
+            
+            container.innerHTML = paths.map(path => {
+                const isEnabled = !disabledSet.has(path);
+                const isValid = pathStatus && pathStatus[path] ? pathStatus[path].valid !== false : true;
+                const errorMsg = pathStatus && pathStatus[path] && pathStatus[path].error ? pathStatus[path].error : '';
+                // Escape path for HTML
+                const escapedPath = path.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                
+                // Determine button state and text
+                let buttonClass, buttonText, buttonDisabled = false;
+                if (!isValid) {
+                    buttonClass = 'bg-red-500 text-white cursor-not-allowed';
+                    buttonText = '✗ Invalid Path';
+                    buttonDisabled = true;
+                } else if (isEnabled) {
+                    buttonClass = 'bg-green-600 text-white hover:bg-green-700';
+                    buttonText = '✓ Active';
+                } else {
+                    buttonClass = 'bg-gray-400 text-white hover:bg-gray-500';
+                    buttonText = '○ Inactive';
+                }
+                
+                return `
+                    <div class="flex items-center justify-between p-2 ${!isValid ? 'bg-red-50 border border-red-200' : 'bg-gray-50 border'} rounded">
+                        <div class="flex-1">
+                            <span class="font-mono text-sm">${path}</span>
+                            ${!isValid && errorMsg ? `<p class="text-xs text-red-600 mt-1">${errorMsg}</p>` : ''}
+                        </div>
+                        <button 
+                            type="button"
+                            onclick="${!isValid ? 'return false;' : `toggleWatchPath('${escapedPath}', ${!isEnabled})`}"
+                            ${buttonDisabled ? 'disabled' : ''}
+                            class="px-3 py-1 text-sm rounded ${buttonClass}"
+                        >
+                            ${buttonText}
+                        </button>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Toggle watch path
+        async function toggleWatchPath(path, enabled) {
+            // Validate path before enabling
+            if (enabled) {
+                const canEnable = await validatePathBeforeToggle(path, enabled);
+                if (!canEnable) {
+                    // Reload to refresh status
+                    await loadConfig();
+                    return;
+                }
+            }
+            
+            try {
+                const response = await fetch('/api/watch-paths/toggle', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ path, enabled }),
+                });
+
+                if (response.ok) {
+                    // Reload config to refresh the list
+                    await loadConfig();
+                } else {
+                    const error = await response.text();
+                    alert('Failed to toggle path: ' + error);
+                }
+            } catch (error) {
+                console.error('Failed to toggle path:', error);
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        // Validate path before allowing toggle
+        async function validatePathBeforeToggle(path, enabled) {
+            // Check if path is valid by fetching status
+            try {
+                const statusResponse = await fetch('/api/status');
+                const status = await statusResponse.json();
+                if (status.path_status && status.path_status[path]) {
+                    const pathInfo = status.path_status[path];
+                    if (!pathInfo.valid && enabled) {
+                        alert(`Cannot activate invalid path: ${path}\nError: ${pathInfo.error || 'Path is invalid'}`);
+                        return false;
+                    }
+                }
+                return true;
+            } catch (error) {
+                console.error('Failed to validate path:', error);
+                // Allow toggle if validation fails (don't block user)
+                return true;
+            }
+        }
+            } catch (error) {
+                console.error('Failed to toggle path:', error);
+                alert('Error: ' + error.message);
             }
         }
 

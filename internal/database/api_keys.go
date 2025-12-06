@@ -151,10 +151,89 @@ func (s *APIKeyStore) ValidateKey(key string) (bool, error) {
 	return isActive, nil
 }
 
-// RevokeKey revokes an API key
+// RevokeKey revokes an API key (sets is_active = FALSE)
 func (s *APIKeyStore) RevokeKey(key string) error {
-	_, err := s.db.Exec(
+	result, err := s.db.Exec(
 		"UPDATE api_keys SET is_active = FALSE WHERE key = ?",
+		key,
+	)
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to revoke key %s: %v", key, err)
+		return fmt.Errorf("failed to revoke key: %w", err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to get rows affected for revoke: %v", err)
+		return fmt.Errorf("failed to verify revoke: %w", err)
+	}
+	
+	if rowsAffected == 0 {
+		log.Printf("[API KEYS WARNING] Revoke key %s: no rows affected (key may not exist)", key)
+		return fmt.Errorf("key not found")
+	}
+	
+	log.Printf("[API KEYS] Successfully revoked key %s (rows affected: %d)", key, rowsAffected)
+	return nil
+}
+
+// EnableKey enables an API key (sets is_active = TRUE)
+func (s *APIKeyStore) EnableKey(key string) error {
+	result, err := s.db.Exec(
+		"UPDATE api_keys SET is_active = TRUE WHERE key = ?",
+		key,
+	)
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to enable key %s: %v", key, err)
+		return fmt.Errorf("failed to enable key: %w", err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to get rows affected for enable: %v", err)
+		return fmt.Errorf("failed to verify enable: %w", err)
+	}
+	
+	if rowsAffected == 0 {
+		log.Printf("[API KEYS WARNING] Enable key %s: no rows affected (key may not exist)", key)
+		return fmt.Errorf("key not found")
+	}
+	
+	log.Printf("[API KEYS] Successfully enabled key %s (rows affected: %d)", key, rowsAffected)
+	return nil
+}
+
+// DeleteKey permanently deletes an API key
+func (s *APIKeyStore) DeleteKey(key string) error {
+	result, err := s.db.Exec(
+		"DELETE FROM api_keys WHERE key = ?",
+		key,
+	)
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to delete key %s: %v", key, err)
+		return fmt.Errorf("failed to delete key: %w", err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("[API KEYS ERROR] Failed to get rows affected for delete: %v", err)
+		return fmt.Errorf("failed to verify delete: %w", err)
+	}
+	
+	if rowsAffected == 0 {
+		log.Printf("[API KEYS WARNING] Delete key %s: no rows affected (key may not exist)", key)
+		return fmt.Errorf("key not found")
+	}
+	
+	log.Printf("[API KEYS] Successfully deleted key %s (rows affected: %d)", key, rowsAffected)
+	return nil
+}
+
+// MarkKeyInactive marks an API key as inactive (for client shutdown)
+func (s *APIKeyStore) MarkKeyInactive(key string) error {
+	_, err := s.db.Exec(
+		"UPDATE api_keys SET is_active = FALSE, last_seen_at = ? WHERE key = ?",
+		time.Now(),
 		key,
 	)
 	return err
@@ -182,7 +261,7 @@ func (s *APIKeyStore) ListKeys() ([]APIKey, error) {
 
 	var keys []APIKey
 	now := time.Now()
-	onlineThreshold := 30 * time.Second // Consider online if seen within last 30 seconds
+	onlineThreshold := 5 * time.Minute // Consider online if seen within last 5 minutes
 
 	for rows.Next() {
 		var key APIKey
@@ -191,6 +270,17 @@ func (s *APIKeyStore) ListKeys() ([]APIKey, error) {
 			return nil, err
 		}
 		
+		// If key is inactive, always mark as offline
+		if !key.IsActive {
+			key.IsOnline = false
+			if lastSeenAt.Valid {
+				key.LastSeenAt = &lastSeenAt.Time
+			}
+			keys = append(keys, key)
+			continue
+		}
+		
+		// For active keys, check if last seen within threshold
 		if lastSeenAt.Valid {
 			key.LastSeenAt = &lastSeenAt.Time
 			// Check if last seen within threshold

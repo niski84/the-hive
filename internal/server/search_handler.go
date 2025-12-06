@@ -107,8 +107,15 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get organization ID from context
+	orgID := ""
+	if orgIDVal := r.Context().Value("organization_id"); orgIDVal != nil {
+		if orgIDStr, ok := orgIDVal.(string); ok {
+			orgID = orgIDStr
+		}
+	}
 	// Search in Qdrant
-	matches, err := h.vectorDB.Search(ctx, queryVector, req.TopK)
+	matches, err := h.vectorDB.Search(ctx, queryVector, req.TopK, orgID)
 	if err != nil {
 		log.Printf("Failed to search Qdrant: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -169,8 +176,9 @@ func (h *SearchHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	// Log audit entry
 	if h.auditLogStore != nil {
 		clientIP := getClientIP(r)
+		// Get organization ID from context (already retrieved above)
 		details := fmt.Sprintf("Client [%s] searched for [%s]", clientIP, req.Query)
-		if err := h.auditLogStore.LogAction(clientIP, database.AuditActionSearch, details); err != nil {
+		if err := h.auditLogStore.LogAction(clientIP, database.AuditActionSearch, details, orgID); err != nil {
 			log.Printf("Failed to log search audit entry: %v", err)
 		}
 	}

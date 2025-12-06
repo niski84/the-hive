@@ -57,30 +57,3 @@ func (s *HiveService) Ingest(ctx context.Context, req *proto.Chunk) (*proto.Stat
 		ChunkId: req.Id,
 	}, nil
 }
-
-// Query delegates to the vector DB and stitches the textual payload from SQLite.
-func (s *HiveService) Query(ctx context.Context, req *proto.Search) (*proto.Result, error) {
-	matches, err := s.vectorDB.Search(ctx, req.QueryVector, int(req.TopK))
-	if err != nil {
-		return &proto.Result{}, err
-	}
-
-	protoMatches := make([]*proto.Match, 0, len(matches))
-	for _, match := range matches {
-		var content string
-		if err := s.db.QueryRowContext(ctx, "SELECT content FROM chunks WHERE id = ?", match.ID).Scan(&content); err != nil {
-			// Missing row should not fail the entire request.
-			log.Printf("failed to fetch chunk %s content: %v", match.ID, err)
-			continue
-		}
-		protoMatches = append(protoMatches, &proto.Match{
-			ChunkId:    match.ID,
-			DocumentId: match.DocumentID,
-			Content:    content,
-			Score:      match.Score,
-			Metadata:   match.Metadata,
-		})
-	}
-
-	return &proto.Result{Matches: protoMatches}, nil
-}

@@ -195,6 +195,63 @@ func main() {
 	}
 	logger.Printf("System metadata initialized")
 
+	// Initialize organization store (must be before user store)
+	orgStore, err := database.NewOrganizationStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize organization store: %v", err)
+	}
+	
+	// Bootstrap default organization
+	defaultOrg, err := orgStore.GetDefaultOrganization()
+	if err != nil {
+		logger.Fatalf("failed to get default organization: %v", err)
+	}
+	logger.Printf("Default organization initialized: %s (ID: %s)", defaultOrg.Name, defaultOrg.ID)
+
+	// Initialize user store (for authentication and RBAC)
+	userStore, err := database.NewUserStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize user store: %v", err)
+	}
+	
+	// Initialize chat store (for chat sessions and messages)
+	chatStore, err := database.NewChatStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize chat store: %v", err)
+	}
+	logger.Printf("Chat store initialized")
+
+	// Initialize usage store (for token usage tracking)
+	usageStore, err := database.NewUsageStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize usage store: %v", err)
+	}
+	logger.Printf("Usage store initialized")
+	
+	// Initialize custom domain store (for custom domain mappings)
+	domainStore, err := database.NewCustomDomainStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize custom domain store: %v", err)
+	}
+	logger.Printf("Custom domain store initialized")
+
+	// Bootstrap default admin user if no users exist (assign to default org)
+	adminCreated, err := userStore.BootstrapAdmin(defaultOrg.ID)
+	if err != nil {
+		logger.Fatalf("failed to bootstrap admin user: %v", err)
+	}
+	if adminCreated {
+		logger.Printf("═══════════════════════════════════════════════════════════")
+		logger.Printf("⚠️  DEFAULT ADMIN USER CREATED")
+		logger.Printf("   Email:    admin@local")
+		logger.Printf("   Password: admin")
+		logger.Printf("   Organization: %s", defaultOrg.Name)
+		logger.Printf("   ⚠️  PLEASE CHANGE THIS PASSWORD IMMEDIATELY!")
+		logger.Printf("═══════════════════════════════════════════════════════════")
+	} else {
+		logger.Printf("User store initialized (existing users found)")
+	}
+
 	// Connect to Qdrant via gRPC (optional - will use mock if unavailable)
 	var vectorDB vectordb.VectorDB
 	qdrantConn, err := grpc.Dial("localhost:6334", grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -273,9 +330,21 @@ func main() {
 	// Initialize WebSocket manager (before hiveService so we can pass it)
 	wsManager := server.NewWebSocketManager(redisClient)
 
+	// Initialize rule match store
+	ruleMatchStore, err := database.NewRuleMatchStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize rule match store: %v", err)
+	}
+
+	// Initialize rule event store
+	ruleEventStore, err := database.NewRuleEventStore(db)
+	if err != nil {
+		logger.Fatalf("failed to initialize rule event store: %v", err)
+	}
+
 	// Initialize analyst worker pool
 	notificationAdapterImpl := &notificationAdapter{wm: wsManager}
-	analystPool := worker.NewAnalystPool(ruleStore, notificationAdapterImpl, graphStore, vectorDB, embedder, 3)
+	analystPool := worker.NewAnalystPool(ruleStore, notificationAdapterImpl, graphStore, vectorDB, embedder, ruleMatchStore, ruleEventStore, 3)
 	analystPool.Start()
 	defer analystPool.Stop()
 
@@ -287,6 +356,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	hiveService := server.NewHiveService(db, vectorDB, embedder)
 	hiveService.SetWebSocketManager(wsManager)
+	hiveService.SetAnalystPool(analystPool)
 	proto.RegisterHiveServer(grpcServer, hiveService)
 
 	grpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", *grpcPort))
@@ -303,7 +373,7 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *httpPort),
-		Handler: routes(db, vectorDB, embedder, jobQueue, wsManager, analystPool, taggerPool, ruleStore, eventLogger, graphStore, apiKeyStore, auditLogStore, metadataStore, *templateDir, *staticDir),
+		Handler: routes(db, vectorDB, embedder, jobQueue, wsManager, analystPool, taggerPool, ruleStore, eventLogger, graphStore, apiKeyStore, auditLogStore, metadataStore, ruleMatchStore, ruleEventStore, userStore, chatStore, orgStore, usageStore, domainStore, *templateDir, *staticDir),
 	}
 
 	go func() {
@@ -396,10 +466,53 @@ func initDatabase(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 	`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Migration: Add organization_id column if it doesn't exist
+	rows, err := db.Query("PRAGMA table_info(chunks)")
+	if err == nil {
+		defer rows.Close()
+		hasOrgID := false
+		for rows.Next() {
+			var cid int
+			var name, dataType string
+			var notNull, pk int
+			var defaultValue interface{}
+			if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err == nil {
+				if name == "organization_id" {
+					hasOrgID = true
+					break
+				}
+			}
+		}
+		if !hasOrgID {
+			log.Printf("[MIGRATION] Adding organization_id column to chunks table")
+			_, err = db.Exec("ALTER TABLE chunks ADD COLUMN organization_id TEXT")
+			if err != nil {
+				log.Printf("Warning: Failed to add organization_id to chunks: %v", err)
+			} else {
+				log.Printf("[MIGRATION] Successfully added organization_id column to chunks")
+				// Create index after adding column
+				_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_chunks_organization_id ON chunks(organization_id)")
+				if err != nil {
+					log.Printf("Warning: Failed to create organization_id index on chunks: %v", err)
+				}
+			}
+		} else {
+			// Column exists, ensure index exists
+			_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_chunks_organization_id ON chunks(organization_id)")
+			if err != nil {
+				log.Printf("Warning: Failed to create organization_id index on chunks: %v", err)
+			}
+		}
+	}
+	
+	return nil
 }
 
-func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder, jobQueue queue.Queue, wsManager *server.WebSocketManager, analystPool *worker.AnalystPool, taggerPool *worker.TaggerPool, ruleStore *rules.Store, eventLogger *database.EventLogger, graphStore *database.GraphStore, apiKeyStore *database.APIKeyStore, auditLogStore *database.AuditLogStore, metadataStore *database.SystemMetadataStore, templateDir, staticDir string) http.Handler {
+func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder, jobQueue queue.Queue, wsManager *server.WebSocketManager, analystPool *worker.AnalystPool, taggerPool *worker.TaggerPool, ruleStore *rules.Store, eventLogger *database.EventLogger, graphStore *database.GraphStore, apiKeyStore *database.APIKeyStore, auditLogStore *database.AuditLogStore, metadataStore *database.SystemMetadataStore, ruleMatchStore *database.RuleMatchStore, ruleEventStore *database.RuleEventStore, userStore *database.UserStore, chatStore *database.ChatStore, orgStore *database.OrganizationStore, usageStore *database.UsageStore, domainStore *database.CustomDomainStore, templateDir, staticDir string) http.Handler {
 	_ = db
 	_ = vectorDB
 	mux := http.NewServeMux()
@@ -409,44 +522,177 @@ func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder
 
 	staticPath, _ := filepath.Abs(staticDir)
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticPath))))
+	
+	// Serve logos from basedmodels directory
+	basedmodelsPath, _ := filepath.Abs(filepath.Join("internal", "server", "basedmodels"))
+	mux.Handle("/static/logos/", http.StripPrefix("/static/logos/", http.FileServer(http.Dir(basedmodelsPath))))
 
 	// Create middleware
 	authMiddleware := server.AuthMiddleware(apiKeyStore)
 	// Use new licensing middleware from middleware package
 	licensingMiddleware := middleware.LicenseMiddleware(metadataStore)
+	// Authentication middleware
+	requireLogin := middleware.RequireLogin(userStore)
+	requireAdmin := middleware.RequireRole(database.RoleAdmin)
+	requireSuperAdmin := middleware.RequireSuperAdmin()
+	
+	// Domain resolution middleware (runs early to resolve tenant from domain)
+	resolveTenantFromDomain := middleware.ResolveTenantFromDomain(domainStore)
 
 	// Create handlers with dependencies
 	ingestHandler := server.NewIngestHandler(vectorDB, wsManager, analystPool, taggerPool, eventLogger, auditLogStore)
 	searchHandler := server.NewSearchHandler(vectorDB, embedder, auditLogStore)
+	chatHandler := server.NewChatHandler(vectorDB, embedder, auditLogStore, chatStore, orgStore, usageStore)
+	purgeHandler := server.NewPurgeHandler(vectorDB, db, auditLogStore)
 
-	// Web interface handlers (public)
-	mux.HandleFunc("/", server.HandleWeb)
-	mux.HandleFunc("/settings", server.HandleSettings)
-	mux.HandleFunc("/timeline", server.HandleTimelinePage)
-	mux.HandleFunc("/graph", server.HandleGraphPage)
+	// Domain validation endpoint (public - called by Caddy for SSL certificate validation)
+	mux.HandleFunc("/api/v1/infra/check-domain", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleCheckDomain(w, r, domainStore)
+	})
+	
+	// Login page (public - no auth required)
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleLoginPage(w, r, metadataStore, orgStore)
+	})
 
-	// Protected API endpoints
-	// Ingest requires client API key authentication
+	// Change password page (requires login)
+	mux.Handle("/change-password", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleChangePasswordPage(w, r, metadataStore, orgStore)
+	})))
+
+	// Authentication API endpoints (public)
+	mux.HandleFunc("/api/v1/login", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleLogin(w, r, userStore, metadataStore)
+	})
+	mux.HandleFunc("/api/v1/logout", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleLogout(w, r, userStore)
+	})
+	mux.Handle("/api/v1/me", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleMe(w, r, userStore)
+	})))
+
+	// Web interface handlers (protected - require login)
+	mux.Handle("/", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleWeb(w, r, metadataStore, orgStore)
+	})))
+	mux.Handle("/chat", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleChatPage(w, r, metadataStore, orgStore)
+	})))
+	mux.Handle("/analyst", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleAnalystPage(w, r, metadataStore, orgStore)
+	})))
+	mux.Handle("/activity", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleActivityPage(w, r, metadataStore, orgStore)
+	})))
+	mux.Handle("/timeline", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleTimelinePage(w, r, metadataStore, orgStore)
+	})))
+	mux.Handle("/graph", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGraphPage(w, r, metadataStore, orgStore)
+	})))
+
+	// Access Control page (protected - require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/access", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleAccessPage(w, r, metadataStore, orgStore)
+	}))))
+
+	// Settings page (protected - require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/settings", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleSettings(w, r, metadataStore, orgStore)
+	}))))
+
+	// Super Admin Dashboard (protected - require super admin)
+	// IMPORTANT: requireLogin must wrap requireSuperAdmin so user is set in context first
+	mux.Handle("/super", requireLogin(requireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleSuperAdminPage(w, r, metadataStore, orgStore)
+	}))))
+
+	// Protected API endpoints (require login + tenant)
+	// Create tenant middleware (must run after RequireLogin)
+	requireTenant := middleware.RequireTenant(userStore)
+	
+	// Ingest requires client API key authentication (for drone clients)
+	// Note: For drone clients, organization_id should come from the API key's client association
+	// For now, we'll extract it from the user context if available
 	mux.Handle("/api/v1/ingest", licensingMiddleware(authMiddleware(http.HandlerFunc(ingestHandler.HandleIngest))))
-	// Search requires licensing check only (no API key for web UI)
-	mux.Handle("/api/v1/search", licensingMiddleware(http.HandlerFunc(searchHandler.HandleSearch)))
-
-	// Configuration endpoints
-	mux.HandleFunc("/api/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			server.HandleGetConfig(w, r)
-		} else if r.Method == http.MethodPost {
-			server.HandleSaveConfig(w, r)
+	// Search requires login, tenant, and licensing check
+	mux.Handle("/api/v1/search", requireLogin(requireTenant(licensingMiddleware(http.HandlerFunc(searchHandler.HandleSearch)))))
+	// Chat/Q&A requires login, tenant, and licensing check
+	mux.Handle("/api/v1/chat", requireLogin(requireTenant(licensingMiddleware(http.HandlerFunc(chatHandler.HandleChat)))))
+	
+	// Chat session management endpoints (require login and tenant)
+	// Note: Register the more specific route first (with trailing slash) to match /sessions/{id}/messages
+	mux.Handle("/api/v1/chat/sessions/", requireLogin(requireTenant(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") {
+			server.HandleGetSessionMessages(w, r, chatStore)
+		} else if r.Method == http.MethodDelete {
+			server.HandleDeleteSession(w, r, chatStore)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/v1/logs/stream", server.HandleLogStream)
+	}))))
+	// Register the base sessions route (without trailing slash) for GET and POST
+	mux.Handle("/api/v1/chat/sessions", requireLogin(requireTenant(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetSessions(w, r, chatStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleCreateSession(w, r, chatStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+	
+	// Configuration endpoints
+	// GET: require login (any authenticated user can view config)
+	// POST: require super admin (only super admins can modify infrastructure settings)
+	mux.Handle("/api/v1/config", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetConfig(w, r)
+		} else if r.Method == http.MethodPost {
+			// POST requires super admin
+			requireSuperAdmin(http.HandlerFunc(server.HandleSaveConfig)).ServeHTTP(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/v1/logs/stream", requireLogin(http.HandlerFunc(server.HandleLogStream)))
 
-	// Stats endpoint
-	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
-		server.HandleStats(w, r, vectorDB, db)
+	// Client shutdown notification endpoint (requires API key auth, not session auth)
+	mux.HandleFunc("/api/v1/client/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		server.HandleClientShutdown(w, r, apiKeyStore)
 	})
+
+	// Stats endpoint (require login)
+	mux.Handle("/api/v1/stats", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleStats(w, r, vectorDB, db)
+	})))
+
+	// Purge endpoint (requires admin, login, and licensing check)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/purge", requireLogin(requireAdmin(licensingMiddleware(http.HandlerFunc(purgeHandler.HandlePurge)))))
+
+	// Super Admin endpoints (require super admin role)
+	mux.Handle("/api/v1/admin/organizations", requireLogin(requireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleListOrganizations(w, r, orgStore, userStore, usageStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleCreateOrganization(w, r, orgStore, userStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+	mux.Handle("/api/v1/admin/organizations/", requireLogin(requireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			server.HandleUpdateOrganization(w, r, orgStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+	mux.Handle("/api/v1/admin/login-as/{orgId}", requireLogin(requireSuperAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleLoginAs(w, r, orgStore, userStore, metadataStore)
+	}))))
 
 	// WebSocket endpoint (protected - auth happens in HandleWebSocket)
 	// Note: WebSocket auth is handled via query parameter or header
@@ -454,8 +700,8 @@ func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder
 		wsManager.HandleWebSocket(w, r)
 	})))
 
-	// Rules API endpoints
-	mux.HandleFunc("/api/v1/rules", func(w http.ResponseWriter, r *http.Request) {
+	// Rules API endpoints (require login)
+	mux.Handle("/api/v1/rules", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			server.HandleGetRules(w, r, ruleStore)
 		} else if r.Method == http.MethodPost {
@@ -463,46 +709,152 @@ func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
-	mux.HandleFunc("/api/v1/rules/add", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/v1/rules/add", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleAddRule(w, r, ruleStore)
-	})
-	mux.HandleFunc("/api/v1/rules/update", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/v1/rules/update", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleUpdateRule(w, r, ruleStore)
-	})
-	mux.HandleFunc("/api/v1/rules/delete", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/api/v1/rules/delete", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleDeleteRule(w, r, ruleStore)
-	})
+	})))
+
+	// Rule matches API endpoint (require login)
+	mux.Handle("/api/v1/rule-matches", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGetRuleMatches(w, r, ruleMatchStore)
+	})))
+
+	// Rule events API endpoint (require login)
+	mux.Handle("/api/v1/rule-events", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGetRuleEvents(w, r, ruleEventStore)
+	})))
+
+	// Audit/Activity API endpoints (require login)
+	mux.Handle("/api/v1/audit", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleAuditLogs(w, r, auditLogStore)
+	})))
+	mux.Handle("/api/v1/audit/export", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleExportAuditLogs(w, r, auditLogStore)
+	})))
+
+	// Branding API endpoints (protected - require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/branding", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetBranding(w, r, metadataStore, orgStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleSaveBranding(w, r, metadataStore, orgStore, userStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+	
+	// Branding status endpoint (check if branding is in use)
+	mux.Handle("/api/v1/branding/status", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleGetBrandingStatus(w, r, metadataStore, userStore)
+	}))))
+
+	// Logo API endpoints
+	mux.HandleFunc("/api/v1/logos", server.HandleListLogos)
+	mux.Handle("/api/v1/logos/upload", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleUploadLogo(w, r, userStore)
+	}))))
+
+	// System Context API endpoints (protected - require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/system-context", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetSystemContext(w, r, orgStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleSaveSystemContext(w, r, orgStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+
+	// Tenant OpenAI Key API endpoints (protected - require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/organization/tenant-openai-key", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleGetTenantOpenAIKey(w, r, orgStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleUpdateTenantOpenAIKey(w, r, orgStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
 
 	// Health endpoint (public - no auth required, but tracks API keys if provided)
 	server.SetHealthAPIKeyStore(apiKeyStore)
 	mux.HandleFunc("/api/v1/health", server.HandleHealth)
 
-	// API Key management endpoints (admin only - no auth required for now, can add admin auth later)
-	mux.HandleFunc("/api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
+	// User management endpoints (require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/users", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			server.HandleListUsers(w, r, userStore)
+		} else if r.Method == http.MethodPost {
+			server.HandleCreateUser(w, r, userStore)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))))
+	// Self-service password change endpoint
+	mux.Handle("/api/v1/users/current/password", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleUpdateCurrentUserPassword(w, r, userStore)
+	})))
+
+	mux.HandleFunc("/api/v1/users/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasSuffix(path, "/password") {
+			// Admin password reset - requires admin
+			// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+			requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				server.HandleUpdateUserPassword(w, r, userStore)
+			}))).ServeHTTP(w, r)
+		} else if strings.HasSuffix(path, "/role") {
+			// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+			requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				server.HandleUpdateUserRole(w, r, userStore)
+			}))).ServeHTTP(w, r)
+		} else if r.Method == http.MethodDelete {
+			// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+			requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				server.HandleDeleteUser(w, r, userStore)
+			}))).ServeHTTP(w, r)
+		} else {
+			http.Error(w, "Not found", http.StatusNotFound)
+		}
+	})
+
+	// API Key management endpoints (require admin)
+	// IMPORTANT: requireLogin must wrap requireAdmin so user is set in context first
+	mux.Handle("/api/v1/keys", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleListAPIKeys(w, r, apiKeyStore)
-	})
-	mux.HandleFunc("/api/v1/keys/generate", func(w http.ResponseWriter, r *http.Request) {
+	}))))
+	mux.Handle("/api/v1/keys/generate", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleGenerateAPIKey(w, r, apiKeyStore)
-	})
-	mux.HandleFunc("/api/v1/keys/revoke", func(w http.ResponseWriter, r *http.Request) {
+	}))))
+	mux.Handle("/api/v1/keys/revoke", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleRevokeAPIKey(w, r, apiKeyStore)
-	})
+	}))))
+	mux.Handle("/api/v1/keys/enable", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleEnableAPIKey(w, r, apiKeyStore)
+	}))))
+	mux.Handle("/api/v1/keys/delete", requireLogin(requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server.HandleDeleteAPIKey(w, r, apiKeyStore)
+	}))))
 
-	// Timeline API endpoint
-	mux.HandleFunc("/api/v1/timeline", func(w http.ResponseWriter, r *http.Request) {
+	// Timeline API endpoint (require login)
+	mux.Handle("/api/v1/timeline", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleTimeline(w, r, eventLogger)
-	})
+	})))
 
-	// Graph API endpoint (returns JSON data)
-	mux.HandleFunc("/api/v1/graph", func(w http.ResponseWriter, r *http.Request) {
+	// Graph API endpoint (require login)
+	mux.Handle("/api/v1/graph", requireLogin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.HandleGraph(w, r, graphStore)
-	})
-
-	// Audit log API endpoint
-	mux.HandleFunc("/api/v1/audit", func(w http.ResponseWriter, r *http.Request) {
-		server.HandleAuditLogs(w, r, auditLogStore)
-	})
+	})))
 
 	mux.HandleFunc("/api/search", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -512,8 +864,9 @@ func routes(db *sql.DB, vectorDB vectordb.VectorDB, embedder embeddings.Embedder
 		searchHandler.HandleSearch(w, r)
 	})
 
-	// Wrap all routes with traffic logger
-	return trafficLogger(mux)
+	// Wrap all routes with domain resolution (early) and traffic logger
+	// Domain resolution must run first to identify tenant from domain
+	return trafficLogger(resolveTenantFromDomain(mux))
 }
 
 func waitForShutdown(grpcServer *grpc.Server, httpServer *http.Server, workerCancel context.CancelFunc) {

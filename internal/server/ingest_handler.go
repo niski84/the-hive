@@ -193,8 +193,15 @@ func (h *IngestHandler) HandleIngest(w http.ResponseWriter, r *http.Request) {
 		if documentName == "" {
 			documentName = req.FilePath
 		}
+		// Get organization ID from context
+		orgID := ""
+		if orgIDVal := r.Context().Value("organization_id"); orgIDVal != nil {
+			if orgIDStr, ok := orgIDVal.(string); ok {
+				orgID = orgIDStr
+			}
+		}
 		details := fmt.Sprintf("Client [%s] uploaded file [%s] (%d chunks)", clientIP, documentName, successCount)
-		if err := h.auditLogStore.LogAction(clientIP, database.AuditActionIngest, details); err != nil {
+		if err := h.auditLogStore.LogAction(clientIP, database.AuditActionIngest, details, orgID); err != nil {
 			log.Printf("Failed to log ingest audit entry: %v", err)
 		}
 	}

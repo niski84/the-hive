@@ -432,6 +432,10 @@ Author: Nicholas Skitch
                         statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-orange-200 text-orange-700';
                         dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-orange-500';
                         textEl.textContent = 'Config Required';
+                    } else if (data.status === 'disabled_on_server') {
+                        statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-yellow-200 text-yellow-700';
+                        dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-yellow-500';
+                        textEl.textContent = 'Access Revoked';
                     } else {
                         statusEl.className = 'px-3 py-1 rounded-full text-sm font-semibold bg-gray-200 text-gray-700';
                         dotEl.className = 'status-dot inline-block w-2 h-2 rounded-full mr-2 bg-gray-500';

@@ -76,12 +76,13 @@ func GetDefault() *Logger {
 		return defaultLogger
 	}
 	
-	// Check if the logger is closed
+	// Check if the logger is closed or if broadcast channel is closed
 	defaultLogger.mu.RLock()
 	closed := defaultLogger.closed
+	broadcast := defaultLogger.broadcast
 	defaultLogger.mu.RUnlock()
 	
-	if closed {
+	if closed || broadcast == nil {
 		// Logger was closed - create a new fallback logger
 		// This ensures we always have a working logger even if the original was closed
 		defaultLogger = &Logger{
@@ -101,11 +102,16 @@ func GetDefault() *Logger {
 // If the logger is closed, returns nil
 // Also returns the bidirectional channel for unsubscribe
 func (l *Logger) Subscribe() (<-chan string, chan string) {
+	if l == nil {
+		return nil, nil
+	}
+	
 	l.mu.RLock()
 	closed := l.closed
+	broadcast := l.broadcast
 	l.mu.RUnlock()
 	
-	if closed {
+	if closed || broadcast == nil {
 		return nil, nil
 	}
 	
@@ -113,6 +119,9 @@ func (l *Logger) Subscribe() (<-chan string, chan string) {
 	clientChan := make(chan string, 10)
 	
 	l.subMu.Lock()
+	if l.subscribers == nil {
+		l.subscribers = make(map[chan string]bool)
+	}
 	l.subscribers[clientChan] = true
 	l.subMu.Unlock()
 	
@@ -136,6 +145,16 @@ func (l *Logger) Unsubscribe(ch chan string) {
 
 // broadcastLoop reads from the main broadcast channel and forwards to all subscribers
 func (l *Logger) broadcastLoop() {
+	defer func() {
+		// Clean up all subscribers if broadcast loop exits
+		l.subMu.Lock()
+		for ch := range l.subscribers {
+			close(ch)
+		}
+		l.subscribers = make(map[chan string]bool)
+		l.subMu.Unlock()
+	}()
+	
 	for logLine := range l.broadcast {
 		l.subMu.RLock()
 		subscribers := make([]chan string, 0, len(l.subscribers))

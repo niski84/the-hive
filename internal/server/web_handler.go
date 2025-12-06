@@ -7,6 +7,8 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+
+	"github.com/the-hive/internal/database"
 )
 
 //go:embed templates/*
@@ -30,7 +32,7 @@ func renderTemplate(w http.ResponseWriter, tmplName string, data interface{}) er
 }
 
 // HandleWeb serves the main web interface (search page)
-func HandleWeb(w http.ResponseWriter, r *http.Request) {
+func HandleWeb(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -43,7 +45,7 @@ func HandleWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleSettings serves the settings page
-func HandleSettings(w http.ResponseWriter, r *http.Request) {
+func HandleSettings(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -56,7 +58,7 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleTimelinePage serves the timeline visualization page
-func HandleTimelinePage(w http.ResponseWriter, r *http.Request) {
+func HandleTimelinePage(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -69,13 +71,52 @@ func HandleTimelinePage(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleGraphPage serves the graph visualization page
-func HandleGraphPage(w http.ResponseWriter, r *http.Request) {
+func HandleGraphPage(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	if err := renderTemplate(w, "graph.html", nil); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleActivityPage serves the activity page
+func HandleActivityPage(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := renderTemplate(w, "activity.html", nil); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleAccessPage serves the access control page
+func HandleAccessPage(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := renderTemplate(w, "access.html", nil); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleSuperAdminPage serves the super admin dashboard
+func HandleSuperAdminPage(w http.ResponseWriter, r *http.Request, metadataStore *database.SystemMetadataStore, orgStore *database.OrganizationStore) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := renderTemplate(w, "super_admin.html", nil); err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}

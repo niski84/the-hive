@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gen2brain/beeep"
 	"github.com/the-hive/internal/drone"
 	"github.com/the-hive/internal/drone/events"
 	"github.com/the-hive/internal/drone/heartbeat"
@@ -80,7 +81,7 @@ func main() {
 	}
 
 	// Initialize file watcher manager with database support
-	watcherMgr, err := watcher.NewManager(config.WatchPaths, config.Server.Address, config.GrpcServerAddress, config.ClientID, eventBroadcaster, configDir)
+	watcherMgr, err := watcher.NewManager(config.WatchPaths, config.DisabledPaths, config.Server.Address, config.GrpcServerAddress, config.ClientID, eventBroadcaster, configDir)
 	if err != nil {
 		log.Fatalf("Failed to initialize watcher manager: %v", err)
 	}
@@ -111,6 +112,15 @@ func main() {
 				"type":  notification.Type,
 				"level": notification.Level,
 			})
+			
+			// Trigger OS notification for rule matches (ALERT type)
+			if notification.Type == "ALERT" {
+				title := "The Hive - Rule Match"
+				message := notification.Message
+				if err := beeep.Alert(title, message, ""); err != nil {
+					log.Printf("Failed to send OS notification: %v", err)
+				}
+			}
 		})
 
 		// Connect WebSocket in background

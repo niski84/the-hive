@@ -130,7 +130,7 @@ Return format: ["#tag1", "#tag2", "#tag3"]`, content)
 	defer cancel()
 
 	// Try to use OpenAI if available
-	answer, err := ai.AskQuestion(ctx, prompt)
+	answer, _, err := ai.AskQuestion(ctx, prompt)
 	if err != nil {
 		// Fallback: simple keyword-based tagging
 		log.Printf("AI service unavailable, using fallback tagging: %v", err)

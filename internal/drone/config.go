@@ -18,6 +18,7 @@ type Config struct {
 	Server            ServerConfig    `mapstructure:"server"`
 	GrpcServerAddress string          `mapstructure:"grpc_server_address"`
 	WatchPaths        []string        `mapstructure:"watch_paths"`
+	DisabledPaths     []string        `mapstructure:"disabled_paths"` // Paths that are configured but not actively watched
 	WebServer         WebServerConfig `mapstructure:"web_server"`
 	APIKey            string          `mapstructure:"api_key"`
 }
@@ -153,6 +154,7 @@ func SaveConfig(config *Config, configPath string) error {
 	viper.Set("grpc_server_address", config.GrpcServerAddress)
 	viper.Set("api_key", config.APIKey)
 	viper.Set("watch_paths", config.WatchPaths)
+	viper.Set("disabled_paths", config.DisabledPaths)
 	viper.Set("web_server.port", config.WebServer.Port)
 
 	// Write to file
